@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run main.py (debug)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONFAULTHANDLER": "1"
+      }
+    },
+    {
+      "name": "Attach by PID",
+      "type": "debugpy",
+      "request": "attach",
+      "processId": "${command:pickProcess}",
+      "justMyCode": false
+    }
+  ]
+}
