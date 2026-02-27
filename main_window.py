@@ -378,7 +378,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_current_zip_label(self) -> None:
         if self._current_zip_path:
-            self.lbl_pack_name.setText(f"Pack: {self._current_zip_path.name}")
+            self.lbl_pack_name.setText(f"Pack: {self._current_zip_path}")
         else:
             self.lbl_pack_name.setText("Pack: (new pack)")
 
