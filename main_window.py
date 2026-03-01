@@ -184,10 +184,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._history_index = -1
         self._saved_history_index = -1
         self._history_limit = 200
+        self._toggle_location_cell_on_click = False
         self._allowed_soh_ids = self._load_allowed_soh_ids()
         self._allowed_soh_set = set(self._allowed_soh_ids)
 
         self._build_ui()
+        self._apply_view_selection_palettes()
         self._wire_signals()
 
         self._suspend_dirty_tracking = True
@@ -198,6 +200,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_ui()
         self._reset_history()
         self.show_status("Created new pack")
+
+    def _apply_view_selection_style(
+        self,
+        widget: QtWidgets.QWidget,
+        selector: str,
+        item_padding_left: int = 0,
+    ) -> None:
+        pal = widget.palette()
+        highlight = pal.color(QtGui.QPalette.Highlight)
+        highlighted_text = pal.color(QtGui.QPalette.HighlightedText)
+        widget.setStyleSheet(
+            f"""
+            {selector} {{
+                outline: 0;
+            }}
+            {selector}::item {{
+                padding-left: {item_padding_left}px;
+            }}
+            {selector}::item:selected,
+            {selector}::item:selected:active,
+            {selector}::item:selected:!active {{
+                background: {highlight.name()};
+                color: {highlighted_text.name()};
+                border: none;
+                outline: none;
+            }}
+            """
+        )
+
+    def _apply_view_selection_palettes(self) -> None:
+        self._apply_view_selection_style(self.tree, "QTreeWidget")
+        self._apply_view_selection_style(self.list_checks, "QListWidget", item_padding_left=4)
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:
+        if event.type() in (
+            QtCore.QEvent.PaletteChange,
+            QtCore.QEvent.ApplicationPaletteChange,
+            QtCore.QEvent.StyleChange,
+        ):
+            self._apply_view_selection_palettes()
+        super().changeEvent(event)
 
     def _load_allowed_soh_ids(self) -> List[str]:
         candidates = [
@@ -280,6 +323,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tbl_locations = QtWidgets.QTableWidget(0, 4)
         self.tbl_locations.setHorizontalHeaderLabels(["Map", "X", "Y", "Size"])
         self.tbl_locations.horizontalHeader().setStretchLastSection(True)
+        self.tbl_locations.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.tbl_locations.setFixedHeight(150)
         form_layout.addRow(self.tbl_locations)
 
@@ -304,6 +348,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_undo.setShortcut(QtGui.QKeySequence.Undo)
         self.act_redo = QtGui.QAction("Redo", self)
         self.act_redo.setShortcut(QtGui.QKeySequence.Redo)
+        undo_shortcut = self.act_undo.shortcut().toString(QtGui.QKeySequence.NativeText)
+        redo_shortcut = self.act_redo.shortcut().toString(QtGui.QKeySequence.NativeText)
+        self.act_undo.setToolTip(f"Undo ({undo_shortcut})" if undo_shortcut else "Undo")
+        self.act_redo.setToolTip(f"Redo ({redo_shortcut})" if redo_shortcut else "Redo")
 
         self.chk_clean = QtWidgets.QCheckBox("Clean output (strip unused fields)")
         self.chk_clean.setChecked(False)
@@ -354,6 +402,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cb_soh.lineEdit().editingFinished.connect(self.on_check_fields_changed)
         self.cb_soh.activated.connect(lambda _idx: self.on_check_fields_changed())
         self.tbl_locations.itemChanged.connect(self.on_locations_table_changed)
+        self.tbl_locations.currentCellChanged.connect(self.on_location_row_selected)
+        self.tbl_locations.itemSelectionChanged.connect(self.on_location_selection_changed)
+        self.tbl_locations.cellPressed.connect(self.on_location_cell_pressed)
+        self.tbl_locations.cellClicked.connect(self.on_location_cell_clicked)
 
         self.btn_add_loc.clicked.connect(self.on_add_location)
         self.btn_del_loc.clicked.connect(self.on_del_location)
@@ -411,9 +463,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._restoring_history = True
         snap = self._history[index]
+        current_map = self._current_map
         self.model.maps = copy.deepcopy(snap["maps"])
         self.model.areas = copy.deepcopy(snap["areas"])
-        self._current_map = snap["current_map"]
+        if current_map and self.model.find_map(current_map):
+            self._current_map = current_map
+        else:
+            self._current_map = snap["current_map"]
         self._selected_ref = None
         self.refresh_ui()
         self._history_index = index
@@ -427,22 +483,29 @@ class MainWindow(QtWidgets.QMainWindow):
         suffix = " *" if dirty else ""
         self.setWindowTitle(f"{self._title_base}{suffix}")
 
+    def _has_unsaved_changes(self) -> bool:
+        return self._dirty or self._history_index != self._saved_history_index
+
     def show_status(self, message: str, timeout_ms: int = 4000) -> None:
         self.statusBar().showMessage(message, timeout_ms)
 
     def maybe_prompt_export(self) -> bool:
-        if not self._dirty:
+        if not self._has_unsaved_changes():
             return True
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle("Unsaved changes")
-        msg.setText("You have unsaved changes. Export before continuing?")
+        msg.setText("You have changes that have not been exported.")
+        msg.setInformativeText("Export before continuing?")
         msg.setStandardButtons(
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel
+            QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard | QtWidgets.QMessageBox.Cancel
         )
+        msg.button(QtWidgets.QMessageBox.Save).setText("Export")
+        msg.button(QtWidgets.QMessageBox.Discard).setText("Continue without exporting")
+        msg.setDefaultButton(QtWidgets.QMessageBox.Save)
         choice = msg.exec()
         if choice == QtWidgets.QMessageBox.Cancel:
             return False
-        if choice == QtWidgets.QMessageBox.Yes:
+        if choice == QtWidgets.QMessageBox.Save:
             return self.on_export()
         return True
 
@@ -655,7 +718,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.list_checks.blockSignals(False)
 
         if keep:
-            found = self._select_check_in_list(keep[0], keep[1], ensure_visible=False)
+            found = self._select_check_in_list(
+                keep[0],
+                keep[1],
+                ensure_visible=False,
+                emit_signals=False,
+            )
             if not found and filter_current_map:
                 self._selected_ref = None
                 self.refresh_selected_editor()
@@ -767,17 +835,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.model.changed.emit()
         self.show_status(f"Deleted map: {target}")
 
-    def _select_check_in_list(self, area: AreaDef, check: CheckDef, ensure_visible: bool) -> bool:
+    def _select_check_in_list(
+        self,
+        area: AreaDef,
+        check: CheckDef,
+        ensure_visible: bool,
+        emit_signals: bool = True,
+    ) -> bool:
         for idx in range(self.list_checks.count()):
             item = self.list_checks.item(idx)
             area2, check2 = item.data(QtCore.Qt.UserRole)
             if area2 is area and check2 is check:
-                self.list_checks.setCurrentItem(item)
+                if emit_signals:
+                    self.list_checks.setCurrentItem(item)
+                else:
+                    self.list_checks.blockSignals(True)
+                    self.list_checks.setCurrentItem(item)
+                    self.list_checks.blockSignals(False)
                 return True
         if ensure_visible:
             self.search.clear()
             self.refresh_check_list()
-            return self._select_check_in_list(area, check, ensure_visible=False)
+            return self._select_check_in_list(
+                area,
+                check,
+                ensure_visible=False,
+                emit_signals=emit_signals,
+            )
         return False
 
     def select_check(self, area: AreaDef, check: CheckDef, ensure_visible: bool = True) -> None:
@@ -822,6 +906,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         area, check = current.data(QtCore.Qt.UserRole)
         self._selected_ref = (area, check)
+        if check.map_locations:
+            self._current_map = check.map_locations[0].map
+            self.refresh_tree()
+            self.refresh_canvas()
+            self.refresh_check_list()
+            self._select_check_in_list(area, check, ensure_visible=False, emit_signals=False)
         self.refresh_selected_editor()
 
     def on_canvas_locations_changed(self) -> None:
@@ -884,6 +974,63 @@ class MainWindow(QtWidgets.QMainWindow):
             self.canvas.reload()
         except ValueError:
             pass
+
+    def on_location_row_selected(
+        self,
+        current_row: int,
+        current_column: int,
+        _previous_row: int,
+        _previous_column: int,
+    ) -> None:
+        if not self._selected_ref:
+            return
+        area, check = self._selected_ref
+        if current_row < 0 or current_column != 0:
+            self.canvas.set_selected_location(area, check, None)
+            return
+        if current_row >= len(check.map_locations):
+            return
+        location = check.map_locations[current_row]
+        if location.map:
+            self._current_map = location.map
+            self.refresh_canvas()
+            self.refresh_tree()
+            self.refresh_check_list()
+            self._select_check_in_list(area, check, ensure_visible=False, emit_signals=False)
+        self.canvas.set_selected_location(area, check, location)
+
+    def on_location_selection_changed(self) -> None:
+        if not self._selected_ref:
+            return
+        area, check = self._selected_ref
+        if self.tbl_locations.selectionModel() and self.tbl_locations.selectionModel().hasSelection():
+            return
+        self.canvas.set_selected_location(area, check, None)
+
+    def on_location_cell_pressed(self, row: int, column: int) -> None:
+        item = self.tbl_locations.item(row, column)
+        current = self.tbl_locations.currentItem()
+        self._toggle_location_cell_on_click = (
+            column == 0 and item is not None and current is item and item.isSelected()
+        )
+
+    def on_location_cell_clicked(self, row: int, column: int) -> None:
+        if column != 0:
+            self._toggle_location_cell_on_click = False
+            if self._selected_ref:
+                area, check = self._selected_ref
+                self.canvas.set_selected_location(area, check, None)
+            return
+        if not self._toggle_location_cell_on_click:
+            return
+        self._toggle_location_cell_on_click = False
+        self.tbl_locations.blockSignals(True)
+        self.tbl_locations.clearSelection()
+        self.tbl_locations.setCurrentItem(None)
+        self.tbl_locations.blockSignals(False)
+        if self._selected_ref:
+            area, check = self._selected_ref
+            self.canvas.set_selected_location(area, check, None)
 
     def on_add_location(self) -> None:
         if not self._selected_ref:

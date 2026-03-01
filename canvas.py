@@ -41,6 +41,7 @@ class MarkerItem(QtWidgets.QGraphicsRectItem):
         self.on_hovered = on_hovered
         self._was_moved = False
         self._selected = False
+        self._selected_location = False
 
         self.setRect(-size / 2, -size / 2, size, size)
         self.setPos(key[0], key[1])
@@ -53,11 +54,20 @@ class MarkerItem(QtWidgets.QGraphicsRectItem):
         self.badge: Optional[QtWidgets.QGraphicsPathItem] = None
         self.badge_shadow: Optional[QtWidgets.QGraphicsPathItem] = None
         if len(checks) > 1:
+            badge_text = f"×{len(checks)}"
             font = QtGui.QFont()
             font.setBold(True)
-            font.setPointSize(11)
+            font_size = 11
             text_path = QtGui.QPainterPath()
-            text_path.addText(0, 0, font, f"×{len(checks)}")
+            max_text_width = max(8.0, size - 6.0)
+            while font_size > 7:
+                font.setPointSize(font_size)
+                text_path = QtGui.QPainterPath()
+                text_path.addText(0, 0, font, badge_text)
+                if text_path.boundingRect().width() <= max_text_width:
+                    break
+                font_size -= 1
+
             text_rect = text_path.boundingRect()
             text_path.translate(-text_rect.center().x(), -text_rect.center().y())
 
@@ -69,19 +79,21 @@ class MarkerItem(QtWidgets.QGraphicsRectItem):
             self.badge.setPen(QtGui.QPen(QtCore.Qt.NoPen))
             self.badge.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255)))
 
-            badge_rect = self.badge.boundingRect()
-            base_y = -size / 2 - badge_rect.height() * 0.5 - 8
-            self.badge_shadow.setPos(1.2, base_y + 1.2)
-            self.badge.setPos(0, base_y)
+            self.badge_shadow.setPos(1.0, 1.0)
+            self.badge.setPos(0, 0)
             self.badge_shadow.setZValue(1)
             self.badge.setZValue(2)
 
-    def _set_style(self, selected: bool) -> None:
+    def _set_style(self, selected: bool, selected_location: bool = False) -> None:
         self._selected = selected
+        self._selected_location = selected_location
         self.update()
 
     def set_selected_state(self, selected: bool) -> None:
-        self._set_style(selected)
+        self._set_style(selected, self._selected_location)
+
+    def set_selected_location_state(self, selected_location: bool) -> None:
+        self._set_style(self._selected, selected_location)
 
     def paint(
         self,
@@ -90,8 +102,15 @@ class MarkerItem(QtWidgets.QGraphicsRectItem):
         widget: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         rect = self.rect()
-        fill = QtGui.QColor(255, 223, 0, 70) if self._selected else QtGui.QColor(0, 0, 0, 45)
-        inner_color = QtGui.QColor(255, 223, 0) if self._selected else QtGui.QColor(255, 255, 255)
+        if self._selected_location:
+            fill = QtGui.QColor(80, 200, 255, 95)
+            inner_color = QtGui.QColor(80, 200, 255)
+        elif self._selected:
+            fill = QtGui.QColor(255, 223, 0, 70)
+            inner_color = QtGui.QColor(255, 223, 0)
+        else:
+            fill = QtGui.QColor(0, 0, 0, 45)
+            inner_color = QtGui.QColor(255, 255, 255)
 
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         painter.setBrush(QtGui.QBrush(fill))
@@ -103,7 +122,7 @@ class MarkerItem(QtWidgets.QGraphicsRectItem):
         painter.drawRect(rect)
 
         inner_pen = QtGui.QPen(inner_color)
-        inner_pen.setWidth(2 if not self._selected else 3)
+        inner_pen.setWidth(4 if self._selected_location else (3 if self._selected else 2))
         inner_pen.setCosmetic(True)
         painter.setPen(inner_pen)
         painter.drawRect(rect)
@@ -166,6 +185,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
         self._hover_menu_watchdog.timeout.connect(self._check_hover_menu_cursor)
 
         self.selected_check_ref: Optional[Tuple[AreaDef, CheckDef]] = None
+        self.selected_location_ref: Optional[MapLocation] = None
 
         self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
@@ -188,18 +208,81 @@ class MapCanvas(QtWidgets.QGraphicsView):
         if self._pix_item:
             self.fitInView(self._pix_item, QtCore.Qt.KeepAspectRatio)
 
+    def _current_scale(self) -> float:
+        return self.transform().m11()
+
+    def _minimum_scale(self) -> float:
+        if not self._pix_item:
+            return 1.0
+        pix_rect = self._pix_item.boundingRect()
+        viewport_rect = self.viewport().rect()
+        if pix_rect.width() <= 0 or pix_rect.height() <= 0:
+            return 1.0
+        if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+            return 1.0
+        return min(
+            viewport_rect.width() / pix_rect.width(),
+            viewport_rect.height() / pix_rect.height(),
+        )
+
+    def _maximum_scale(self) -> float:
+        min_scale = self._minimum_scale()
+        return max(min_scale, min_scale * 8.0)
+
+    def _enforce_zoom_limits(self) -> None:
+        if not self._pix_item:
+            return
+        current = self._current_scale()
+        min_scale = self._minimum_scale()
+        max_scale = self._maximum_scale()
+        if current < min_scale - 1e-6:
+            self.fit_to_view()
+            return
+        if current > max_scale + 1e-6:
+            center = self.mapToScene(self.viewport().rect().center())
+            factor = max_scale / current
+            self.scale(factor, factor)
+            self.centerOn(center)
+
     def clear_selected_check(self) -> None:
         self.selected_check_ref = None
+        self.selected_location_ref = None
         self._refresh_marker_selection()
 
     def set_selected_check(self, area: AreaDef, check: CheckDef) -> None:
         self.selected_check_ref = (area, check)
+        self.selected_location_ref = None
+        self._refresh_marker_selection()
+
+    def set_selected_location(
+        self,
+        area: AreaDef,
+        check: CheckDef,
+        location: Optional[MapLocation],
+    ) -> None:
+        self.selected_check_ref = (area, check)
+        self.selected_location_ref = location
         self._refresh_marker_selection()
 
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        if not self._pix_item:
+            super().wheelEvent(event)
+            return
         angle = event.angleDelta().y()
+        if angle == 0:
+            event.accept()
+            return
+        current = self._current_scale()
+        min_scale = self._minimum_scale()
+        max_scale = self._maximum_scale()
         factor = 1.15 if angle > 0 else 1 / 1.15
-        self.scale(factor, factor)
+        target = max(min_scale, min(max_scale, current * factor))
+        self.scale(target / current, target / current)
+        event.accept()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._enforce_zoom_limits()
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == QtCore.Qt.LeftButton:
@@ -472,6 +555,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
             self.setTransform(saved_transform)
             self.horizontalScrollBar().setValue(saved_h)
             self.verticalScrollBar().setValue(saved_v)
+            self._enforce_zoom_limits()
             self._refresh_marker_selection()
         finally:
             self._reload_in_progress = False
@@ -483,6 +567,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
         if not self.selected_check_ref:
             for marker in self._markers:
                 marker.set_selected_state(False)
+                marker.set_selected_location_state(False)
             return
 
         selected_area, selected_check = self.selected_check_ref
@@ -492,3 +577,8 @@ class MapCanvas(QtWidgets.QGraphicsView):
                 for area, check, _ in marker.checks
             )
             marker.set_selected_state(match)
+            location_match = (
+                self.selected_location_ref is not None
+                and any(ml is self.selected_location_ref for _, _, ml in marker.checks)
+            )
+            marker.set_selected_location_state(location_match)
