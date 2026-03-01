@@ -870,7 +870,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_selected_editor()
 
     def on_canvas_check_selected(self, area: AreaDef, check: CheckDef) -> None:
-        self.select_check(area, check, ensure_visible=True)
+        self._selected_ref = (area, check)
+        self._select_check_in_list(area, check, ensure_visible=True, emit_signals=False)
+        self.refresh_selected_editor()
 
     def on_canvas_selection_cleared(self) -> None:
         self._selected_ref = None
@@ -906,14 +908,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         area, check = current.data(QtCore.Qt.UserRole)
         self._selected_ref = (area, check)
-        if check.map_locations:
-            target_map = check.map_locations[0].map
-            if target_map and target_map != self._current_map:
-                self._current_map = target_map
-                self.refresh_tree()
-                self.refresh_canvas()
-                self.refresh_check_list()
-                self._select_check_in_list(area, check, ensure_visible=False, emit_signals=False)
         self.refresh_selected_editor()
 
     def on_canvas_locations_changed(self) -> None:

@@ -486,6 +486,33 @@ class MapCanvas(QtWidgets.QGraphicsView):
                 return marker
         return None
 
+    def _dedupe_check_locations(self, check: CheckDef) -> None:
+        seen: set[Tuple[str, int, int, int]] = set()
+        kept: List[MapLocation] = []
+        for location in check.map_locations:
+            key = (location.map, int(location.x), int(location.y), int(location.size))
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(location)
+        check.map_locations = kept
+
+    def _dedupe_checks_for_marker_pair(
+        self,
+        marker: Optional[MarkerItem],
+        merge_target: Optional[MarkerItem],
+    ) -> None:
+        seen_checks: set[int] = set()
+        for source in (marker, merge_target):
+            if source is None:
+                continue
+            for _, check, _ in source.checks:
+                ident = id(check)
+                if ident in seen_checks:
+                    continue
+                seen_checks.add(ident)
+                self._dedupe_check_locations(check)
+
     def _open_stack_menu(
         self, key: Tuple[int, int, int], checks: List[Tuple[AreaDef, CheckDef, MapLocation]]
     ) -> None:
@@ -576,6 +603,8 @@ class MapCanvas(QtWidgets.QGraphicsView):
             location.x = merge_target.key[0]
             location.y = merge_target.key[1]
             location.size = merge_target.key[2]
+            self._dedupe_checks_for_marker_pair(None, merge_target)
+            self._dedupe_check_locations(check)
         else:
             location.x = clamp_int(scene_pos.x(), 0, 99999)
             location.y = clamp_int(scene_pos.y(), 0, 99999)
@@ -649,6 +678,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
                         ml.x = merge_target.key[0]
                         ml.y = merge_target.key[1]
                         ml.size = merge_target.key[2]
+                    self._dedupe_checks_for_marker_pair(marker, merge_target)
                 self.locations_changed.emit()
 
             def on_clicked(marker: MarkerItem) -> bool:
