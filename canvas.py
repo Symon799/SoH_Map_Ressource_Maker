@@ -13,11 +13,57 @@ def clamp_int(value: float, lo: int, hi: int) -> int:
 
 
 class HoverMenuListWidget(QtWidgets.QListWidget):
+    drag_started = QtCore.Signal()
+
+    def __init__(
+        self,
+        parent: Optional[QtWidgets.QWidget] = None,
+        drag_token_for_payload: Optional[Callable[[object], Optional[str]]] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._drag_token_for_payload = drag_token_for_payload
+        self._press_pos: Optional[QtCore.QPoint] = None
+        self._press_item: Optional[QtWidgets.QListWidgetItem] = None
+
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
         # Keep wheel interaction scoped to the dropdown so wheel-at-end
         # does not bubble up and zoom the map view.
         super().wheelEvent(event)
         event.accept()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            self._press_pos = event.pos()
+            self._press_item = self.itemAt(event.pos())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if (
+            event.buttons() & QtCore.Qt.LeftButton
+            and self._press_pos is not None
+            and self._press_item is not None
+            and self._drag_token_for_payload is not None
+        ):
+            if (event.pos() - self._press_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                payload = self._press_item.data(QtCore.Qt.UserRole)
+                token = self._drag_token_for_payload(payload)
+                if token:
+                    mime = QtCore.QMimeData()
+                    mime.setData("application/x-soh-map-location", token.encode("utf-8"))
+                    drag = QtGui.QDrag(self)
+                    drag.setMimeData(mime)
+                    self.drag_started.emit()
+                    drag.exec(QtCore.Qt.MoveAction)
+                self._press_pos = None
+                self._press_item = None
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        self._press_pos = None
+        self._press_item = None
+        super().mouseReleaseEvent(event)
 
 
 class MarkerItem(QtWidgets.QGraphicsRectItem):
@@ -183,6 +229,8 @@ class MapCanvas(QtWidgets.QGraphicsView):
         self._hover_menu_watchdog = QtCore.QTimer(self)
         self._hover_menu_watchdog.setInterval(60)
         self._hover_menu_watchdog.timeout.connect(self._check_hover_menu_cursor)
+        self._drag_payload_nonce = 0
+        self._drag_payloads: Dict[str, Tuple[AreaDef, CheckDef, MapLocation]] = {}
 
         self.selected_check_ref: Optional[Tuple[AreaDef, CheckDef]] = None
         self.selected_location_ref: Optional[MapLocation] = None
@@ -190,6 +238,8 @@ class MapCanvas(QtWidgets.QGraphicsView):
         self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
 
     def set_map(self, map_name: str) -> None:
         self._map_name = map_name
@@ -387,7 +437,10 @@ class MapCanvas(QtWidgets.QGraphicsView):
 
     def _ensure_hover_menu(self) -> QtWidgets.QListWidget:
         if self._hover_menu is None:
-            menu = HoverMenuListWidget(self.viewport())
+            menu = HoverMenuListWidget(
+                self.viewport(),
+                drag_token_for_payload=self._register_drag_payload,
+            )
             menu.setFrameShape(QtWidgets.QFrame.Box)
             menu.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
             menu.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
@@ -398,15 +451,40 @@ class MapCanvas(QtWidgets.QGraphicsView):
                 data = item.data(QtCore.Qt.UserRole)
                 if not data:
                     return
-                area, check = data
+                area, check, _location = data
                 self.selected_check_ref = (area, check)
                 self._refresh_marker_selection()
                 self.check_selected.emit(area, check)
                 self._close_hover_menu()
 
             menu.itemClicked.connect(on_item_clicked)
+            menu.drag_started.connect(self._close_hover_menu)
             self._hover_menu = menu
         return self._hover_menu
+
+    def _register_drag_payload(self, payload: object) -> Optional[str]:
+        if not isinstance(payload, tuple) or len(payload) != 3:
+            return None
+        area, check, location = payload
+        if not isinstance(location, MapLocation):
+            return None
+        self._drag_payload_nonce += 1
+        token = f"{self._drag_payload_nonce}"
+        self._drag_payloads[token] = (area, check, location)
+        return token
+
+    def _find_merge_target(
+        self,
+        scene_pos: QtCore.QPointF,
+        excluded_locations: Optional[set[int]] = None,
+    ) -> Optional[MarkerItem]:
+        excluded_locations = excluded_locations or set()
+        for marker in reversed(self._markers):
+            if any(id(ml) in excluded_locations for _, _, ml in marker.checks):
+                continue
+            if marker.sceneBoundingRect().contains(scene_pos):
+                return marker
+        return None
 
     def _open_stack_menu(
         self, key: Tuple[int, int, int], checks: List[Tuple[AreaDef, CheckDef, MapLocation]]
@@ -416,9 +494,9 @@ class MapCanvas(QtWidgets.QGraphicsView):
             return
 
         menu.clear()
-        for area, check, _ in checks:
+        for area, check, location in checks:
             item = QtWidgets.QListWidgetItem(f"{check.name} [{check.soh_id}]")
-            item.setData(QtCore.Qt.UserRole, (area, check))
+            item.setData(QtCore.Qt.UserRole, (area, check, location))
             menu.addItem(item)
 
         rows = max(1, min(menu.count(), 10))
@@ -467,6 +545,46 @@ class MapCanvas(QtWidgets.QGraphicsView):
         menu.raise_()
         self._hover_menu_key = key
         self._hover_menu_watchdog.start()
+
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
+        if self._map_name and event.mimeData().hasFormat("application/x-soh-map-location"):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: QtGui.QDragMoveEvent) -> None:
+        if self._map_name and event.mimeData().hasFormat("application/x-soh-map-location"):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QtGui.QDropEvent) -> None:
+        if not self._map_name or not event.mimeData().hasFormat("application/x-soh-map-location"):
+            super().dropEvent(event)
+            return
+        token = bytes(event.mimeData().data("application/x-soh-map-location")).decode("utf-8")
+        payload = self._drag_payloads.pop(token, None)
+        if not payload:
+            event.ignore()
+            return
+        area, check, location = payload
+        pos = event.position().toPoint()
+        scene_pos = self.mapToScene(pos)
+        location.map = self._map_name
+        merge_target = self._find_merge_target(scene_pos, excluded_locations={id(location)})
+        if merge_target is not None:
+            location.x = merge_target.key[0]
+            location.y = merge_target.key[1]
+            location.size = merge_target.key[2]
+        else:
+            location.x = clamp_int(scene_pos.x(), 0, 99999)
+            location.y = clamp_int(scene_pos.y(), 0, 99999)
+        self.selected_check_ref = (area, check)
+        self.selected_location_ref = location
+        self.reload()
+        self.check_selected.emit(area, check)
+        self.locations_changed.emit()
+        event.acceptProposedAction()
 
     def _reset_scene(self) -> None:
         self._close_hover_menu()
@@ -521,7 +639,16 @@ class MapCanvas(QtWidgets.QGraphicsView):
                     ml.x = x
                     ml.y = y
 
-            def on_move_finished(_marker: MarkerItem) -> None:
+            def on_move_finished(marker: MarkerItem) -> None:
+                merge_target = self._find_merge_target(
+                    marker.scenePos(),
+                    excluded_locations={id(ml) for _, _, ml in marker.checks},
+                )
+                if merge_target is not None:
+                    for _, _, ml in marker.checks:
+                        ml.x = merge_target.key[0]
+                        ml.y = merge_target.key[1]
+                        ml.size = merge_target.key[2]
                 self.locations_changed.emit()
 
             def on_clicked(marker: MarkerItem) -> bool:

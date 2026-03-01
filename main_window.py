@@ -907,11 +907,13 @@ class MainWindow(QtWidgets.QMainWindow):
         area, check = current.data(QtCore.Qt.UserRole)
         self._selected_ref = (area, check)
         if check.map_locations:
-            self._current_map = check.map_locations[0].map
-            self.refresh_tree()
-            self.refresh_canvas()
-            self.refresh_check_list()
-            self._select_check_in_list(area, check, ensure_visible=False, emit_signals=False)
+            target_map = check.map_locations[0].map
+            if target_map and target_map != self._current_map:
+                self._current_map = target_map
+                self.refresh_tree()
+                self.refresh_canvas()
+                self.refresh_check_list()
+                self._select_check_in_list(area, check, ensure_visible=False, emit_signals=False)
         self.refresh_selected_editor()
 
     def on_canvas_locations_changed(self) -> None:
