@@ -12,6 +12,10 @@ def clamp_int(value: float, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(round(value))))
 
 
+MIN_MARKER_DISPLAY_SIZE = 25
+MIN_BADGE_FONT_SIZE = 8
+
+
 class HoverMenuListWidget(QtWidgets.QListWidget):
     drag_started = QtCore.Signal()
 
@@ -103,10 +107,10 @@ class MarkerItem(QtWidgets.QGraphicsRectItem):
             badge_text = f"×{len(checks)}"
             font = QtGui.QFont()
             font.setBold(True)
-            font_size = 11
+            font_size = max(11, int(round(size * 0.46)))
             text_path = QtGui.QPainterPath()
             max_text_width = max(8.0, size - 6.0)
-            while font_size > 7:
+            while font_size > MIN_BADGE_FONT_SIZE:
                 font.setPointSize(font_size)
                 text_path = QtGui.QPainterPath()
                 text_path.addText(0, 0, font, badge_text)
@@ -257,9 +261,18 @@ class MapCanvas(QtWidgets.QGraphicsView):
     def fit_to_view(self) -> None:
         if self._pix_item:
             self.fitInView(self._pix_item, QtCore.Qt.KeepAspectRatio)
+            self._update_marker_display_scale()
 
     def _current_scale(self) -> float:
         return self.transform().m11()
+
+    def _update_marker_display_scale(self) -> None:
+        current_scale = self._current_scale()
+        if current_scale <= 0:
+            current_scale = 1.0
+        marker_scale = 1.0 / current_scale
+        for marker in self._markers:
+            marker.setScale(marker_scale)
 
     def _minimum_scale(self) -> float:
         if not self._pix_item:
@@ -293,6 +306,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
             factor = max_scale / current
             self.scale(factor, factor)
             self.centerOn(center)
+        self._update_marker_display_scale()
 
     def clear_selected_check(self) -> None:
         self.selected_check_ref = None
@@ -328,6 +342,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
         factor = 1.15 if angle > 0 else 1 / 1.15
         target = max(min_scale, min(max_scale, current * factor))
         self.scale(target / current, target / current)
+        self._update_marker_display_scale()
         event.accept()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
@@ -696,7 +711,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
                 self._open_stack_menu(marker.key, marker.checks)
 
             for key, checks in clusters.items():
-                size = key[2] if key[2] else 24
+                size = max(key[2] if key[2] else 24, MIN_MARKER_DISPLAY_SIZE)
                 marker = MarkerItem(
                     key=key,
                     checks=checks,
@@ -713,6 +728,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
             self.horizontalScrollBar().setValue(saved_h)
             self.verticalScrollBar().setValue(saved_v)
             self._enforce_zoom_limits()
+            self._update_marker_display_scale()
             self._refresh_marker_selection()
         finally:
             self._reload_in_progress = False

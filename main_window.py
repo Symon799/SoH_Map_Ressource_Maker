@@ -243,10 +243,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().changeEvent(event)
 
     def _load_allowed_soh_ids(self) -> List[str]:
-        candidates = [
-            Path(r"d:\DL\in_game_checks.txt"),
-            Path.cwd() / "in_game_checks.txt",
-        ]
+        script_dir = Path(__file__).resolve().parent
+        candidates = [script_dir / "in_game_checks.txt"]
         for path in candidates:
             if not path.exists():
                 continue
@@ -334,8 +332,6 @@ class MainWindow(QtWidgets.QMainWindow):
         loc_btn_row.addWidget(self.btn_del_loc)
         right_layout.addLayout(loc_btn_row)
 
-        self.dirty_label = QtWidgets.QLabel("Saved")
-        self.statusBar().addPermanentWidget(self.dirty_label)
     def _build_toolbar(self) -> None:
         tb = self.addToolBar("Main")
         tb.setMovable(False)
@@ -479,7 +475,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def set_dirty(self, dirty: bool) -> None:
         self._dirty = dirty
-        self.dirty_label.setText("Dirty" if dirty else "Saved")
         suffix = " *" if dirty else ""
         self.setWindowTitle(f"{self._title_base}{suffix}")
 
@@ -487,7 +482,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._dirty or self._history_index != self._saved_history_index
 
     def show_status(self, message: str, timeout_ms: int = 4000) -> None:
-        self.statusBar().showMessage(message, timeout_ms)
+        _ = (message, timeout_ms)
 
     def maybe_prompt_export(self) -> bool:
         if not self._has_unsaved_changes():
@@ -1069,6 +1064,36 @@ class MainWindow(QtWidgets.QMainWindow):
             return str(fallback)
         return map_def.img
 
+    def _image_pixel_size(self, image_path: str) -> Optional[Tuple[int, int]]:
+        image = QtGui.QImage(image_path)
+        if image.isNull():
+            return None
+        return (image.width(), image.height())
+
+    def _rescale_map_locations(
+        self,
+        map_name: str,
+        old_size: Optional[Tuple[int, int]],
+        new_size: Optional[Tuple[int, int]],
+    ) -> None:
+        if not old_size or not new_size:
+            return
+        old_w, old_h = old_size
+        new_w, new_h = new_size
+        if old_w <= 0 or old_h <= 0 or new_w <= 0 or new_h <= 0:
+            return
+        if old_w == new_w and old_h == new_h:
+            return
+
+        scale_x = new_w / old_w
+        scale_y = new_h / old_h
+        for _, check in self.model.all_checks():
+            for location in check.map_locations:
+                if location.map != map_name:
+                    continue
+                location.x = int(round(location.x * scale_x))
+                location.y = int(round(location.y * scale_y))
+
     def _copy_image_into_pack(self, source_path: str) -> str:
         if not self.model.base_dir:
             raise RuntimeError("No pack loaded.")
@@ -1145,11 +1170,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         new_name, new_group, image_path = dlg.values()
         old_name = map_def.name
+        old_image_path = self._resolve_map_image_path(map_def)
+        old_image_size = self._image_pixel_size(old_image_path)
         try:
             rel_img = self._copy_image_into_pack(image_path)
+            new_image_path = str(self.model.base_dir / rel_img) if self.model.base_dir else image_path
+            new_image_size = self._image_pixel_size(new_image_path)
             map_def.name = new_name
             map_def.group = new_group
             map_def.img = rel_img
+            self._rescale_map_locations(old_name, old_image_size, new_image_size)
 
             if old_name != new_name:
                 for _, check in self.model.all_checks():
