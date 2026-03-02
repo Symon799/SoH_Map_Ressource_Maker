@@ -14,6 +14,7 @@ class MapDef:
     name: str
     img: str
     group: str
+    links: List["MapLink"] = field(default_factory=list)
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -39,6 +40,37 @@ class MapLocation:
     def to_dict(self, preserve_unknown: bool) -> Dict[str, Any]:
         out = {
             "map": self.map,
+            "x": int(self.x),
+            "y": int(self.y),
+            "size": int(self.size),
+        }
+        if preserve_unknown:
+            out.update(self.extra)
+        return out
+
+
+@dataclass
+class MapLink:
+    target_map: str
+    x: int
+    y: int
+    size: int = 24
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> "MapLink":
+        extra = {k: v for k, v in data.items() if k not in {"target_map", "x", "y", "size"}}
+        return MapLink(
+            target_map=str(data.get("target_map", "")),
+            x=int(data.get("x", 0)),
+            y=int(data.get("y", 0)),
+            size=int(data.get("size", 24)),
+            extra=extra,
+        )
+
+    def to_dict(self, preserve_unknown: bool) -> Dict[str, Any]:
+        out = {
+            "target_map": self.target_map,
             "x": int(self.x),
             "y": int(self.y),
             "size": int(self.size),
@@ -109,6 +141,13 @@ class PackModel(QtCore.QObject):
             for check in area.checks:
                 out.append((area, check))
         return out
+
+    def count_checks_on_map(self, map_name: str) -> int:
+        count = 0
+        for _area, check in self.all_checks():
+            if any(location.map == map_name for location in check.map_locations):
+                count += 1
+        return count
 
     def find_map(self, name: str) -> Optional[MapDef]:
         for m in self.maps:

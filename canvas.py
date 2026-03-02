@@ -5,7 +5,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from model import AreaDef, CheckDef, MapLocation, PackModel
+from model import AreaDef, CheckDef, MapDef, MapLink, MapLocation, PackModel
 
 
 def clamp_int(value: float, lo: int, hi: int) -> int:
@@ -14,6 +14,7 @@ def clamp_int(value: float, lo: int, hi: int) -> int:
 
 MIN_MARKER_DISPLAY_SIZE = 25
 MIN_BADGE_FONT_SIZE = 8
+MAP_LINK_MIME_TYPE = "application/x-soh-map-link"
 
 
 class HoverMenuListWidget(QtWidgets.QListWidget):
@@ -205,10 +206,127 @@ class MarkerItem(QtWidgets.QGraphicsRectItem):
         return super().itemChange(change, value)
 
 
+class LinkItem(QtWidgets.QGraphicsEllipseItem):
+    def __init__(
+        self,
+        link: MapLink,
+        linked_map_name: str,
+        check_count: int,
+        size: int,
+        on_moved: Callable[["LinkItem", QtCore.QPointF], None],
+        on_move_finished: Callable[["LinkItem"], None],
+        on_clicked: Callable[["LinkItem"], None],
+    ) -> None:
+        super().__init__()
+        self.link = link
+        self.linked_map_name = linked_map_name
+        self.check_count = check_count
+        self.size = size
+        self.on_moved = on_moved
+        self.on_move_finished = on_move_finished
+        self.on_clicked = on_clicked
+        self._was_moved = False
+
+        self.setRect(-size / 2, -size / 2, size, size)
+        self.setPos(link.x, link.y)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setAcceptHoverEvents(True)
+        self.setToolTip(f"{linked_map_name}\n{check_count} check{'s' if check_count != 1 else ''}")
+
+        badge_text = f"×{check_count}"
+        font = QtGui.QFont()
+        font.setBold(True)
+        font_size = max(11, int(round(size * 0.46)))
+        text_path = QtGui.QPainterPath()
+        max_text_width = max(8.0, size - 6.0)
+        while font_size > MIN_BADGE_FONT_SIZE:
+            font.setPointSize(font_size)
+            text_path = QtGui.QPainterPath()
+            text_path.addText(0, 0, font, badge_text)
+            if text_path.boundingRect().width() <= max_text_width:
+                break
+            font_size -= 1
+
+        text_rect = text_path.boundingRect()
+        text_path.translate(-text_rect.center().x(), -text_rect.center().y())
+
+        badge_shadow = QtWidgets.QGraphicsPathItem(text_path, self)
+        badge_shadow.setPen(QtGui.QPen(QtCore.Qt.NoPen))
+        badge_shadow.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 170)))
+        badge_shadow.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+        badge_shadow.setAcceptHoverEvents(False)
+
+        badge = QtWidgets.QGraphicsPathItem(text_path, self)
+        badge.setPen(QtGui.QPen(QtCore.Qt.NoPen))
+        badge.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255)))
+        badge.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+        badge.setAcceptHoverEvents(False)
+
+        badge_shadow.setPos(1.0, 1.0)
+        badge.setPos(0, 0)
+        badge_shadow.setZValue(1)
+        badge.setZValue(2)
+
+    def paint(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionGraphicsItem,
+        widget: Optional[QtWidgets.QWidget] = None,
+    ) -> None:
+        _ = (option, widget)
+        rect = self.rect()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(20, 20, 20, 55)))
+
+        outer_pen = QtGui.QPen(QtGui.QColor(0, 0, 0, 235))
+        outer_pen.setWidth(4)
+        outer_pen.setCosmetic(True)
+        painter.setPen(outer_pen)
+        painter.drawEllipse(rect)
+
+        inner_pen = QtGui.QPen(QtGui.QColor(244, 246, 248))
+        inner_pen.setWidth(3)
+        inner_pen.setCosmetic(True)
+        painter.setPen(inner_pen)
+        painter.drawEllipse(rect)
+
+    def hoverEnterEvent(self, event: QtWidgets.QGraphicsSceneHoverEvent) -> None:
+        QtWidgets.QToolTip.showText(
+            QtGui.QCursor.pos(),
+            f"{self.linked_map_name}\n{self.check_count} check{'s' if self.check_count != 1 else ''}",
+        )
+        super().hoverEnterEvent(event)
+
+    def mousePressEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            self._was_moved = False
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
+        super().mouseReleaseEvent(event)
+        if event.button() != QtCore.Qt.LeftButton:
+            return
+        if self._was_moved:
+            self.on_move_finished(self)
+            self._was_moved = False
+            return
+        self.on_clicked(self)
+
+    def itemChange(self, change: QtWidgets.QGraphicsItem.GraphicsItemChange, value):
+        if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
+            pos: QtCore.QPointF = value
+            self._was_moved = True
+            self.on_moved(self, pos)
+        return super().itemChange(change, value)
+
+
 class MapCanvas(QtWidgets.QGraphicsView):
     check_selected = QtCore.Signal(object, object)
+    map_link_activated = QtCore.Signal(str)
     selection_cleared = QtCore.Signal()
     locations_changed = QtCore.Signal()
+    links_changed = QtCore.Signal()
     add_check_requested = QtCore.Signal(str, int, int)
 
     def __init__(self, model: PackModel) -> None:
@@ -222,6 +340,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
         self._map_name: Optional[str] = None
         self._pix_item: Optional[QtWidgets.QGraphicsPixmapItem] = None
         self._markers: List[MarkerItem] = []
+        self._link_items: List[LinkItem] = []
         self._hover_menu: Optional[QtWidgets.QListWidget] = None
         self._hover_menu_key: Optional[Tuple[int, int, int]] = None
         self._reload_in_progress = False
@@ -273,6 +392,8 @@ class MapCanvas(QtWidgets.QGraphicsView):
         marker_scale = 1.0 / current_scale
         for marker in self._markers:
             marker.setScale(marker_scale)
+        for link_item in self._link_items:
+            link_item.setScale(marker_scale)
 
     def _minimum_scale(self) -> float:
         if not self._pix_item:
@@ -352,10 +473,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == QtCore.Qt.LeftButton:
             item = self.itemAt(event.pos())
-            marker = (
-                isinstance(item, MarkerItem)
-                or (item is not None and isinstance(item.parentItem(), MarkerItem))
-            )
+            marker = self._item_is_interactive_marker(item)
             if self._hover_menu and self._hover_menu.isVisible():
                 if not self._hover_menu.geometry().contains(event.pos()) and not marker:
                     self._close_hover_menu()
@@ -406,6 +524,17 @@ class MapCanvas(QtWidgets.QGraphicsView):
             self._hover_menu.hide()
             self._hover_menu_key = None
         self._hover_menu_watchdog.stop()
+
+    def _current_map_def(self) -> Optional[MapDef]:
+        if not self._map_name:
+            return None
+        return self.model.find_map(self._map_name)
+
+    def _item_is_interactive_marker(self, item: Optional[QtWidgets.QGraphicsItem]) -> bool:
+        if isinstance(item, (MarkerItem, LinkItem)):
+            return True
+        parent = item.parentItem() if item is not None else None
+        return isinstance(parent, (MarkerItem, LinkItem))
 
     def _item_to_marker(self, item: Optional[QtWidgets.QGraphicsItem]) -> Optional[MarkerItem]:
         if isinstance(item, MarkerItem):
@@ -589,21 +718,36 @@ class MapCanvas(QtWidgets.QGraphicsView):
         self._hover_menu_watchdog.start()
 
     def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
-        if self._map_name and event.mimeData().hasFormat("application/x-soh-map-location"):
+        if self._map_name and (
+            event.mimeData().hasFormat("application/x-soh-map-location")
+            or event.mimeData().hasFormat(MAP_LINK_MIME_TYPE)
+        ):
             event.acceptProposedAction()
             return
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event: QtGui.QDragMoveEvent) -> None:
-        if self._map_name and event.mimeData().hasFormat("application/x-soh-map-location"):
+        if self._map_name and (
+            event.mimeData().hasFormat("application/x-soh-map-location")
+            or event.mimeData().hasFormat(MAP_LINK_MIME_TYPE)
+        ):
             event.acceptProposedAction()
             return
         super().dragMoveEvent(event)
 
     def dropEvent(self, event: QtGui.QDropEvent) -> None:
-        if not self._map_name or not event.mimeData().hasFormat("application/x-soh-map-location"):
+        if not self._map_name:
             super().dropEvent(event)
             return
+        if event.mimeData().hasFormat("application/x-soh-map-location"):
+            self._drop_map_location(event)
+            return
+        if event.mimeData().hasFormat(MAP_LINK_MIME_TYPE):
+            self._drop_map_link(event)
+            return
+        super().dropEvent(event)
+
+    def _drop_map_location(self, event: QtGui.QDropEvent) -> None:
         token = bytes(event.mimeData().data("application/x-soh-map-location")).decode("utf-8")
         payload = self._drag_payloads.pop(token, None)
         if not payload:
@@ -630,12 +774,35 @@ class MapCanvas(QtWidgets.QGraphicsView):
         self.locations_changed.emit()
         event.acceptProposedAction()
 
+    def _drop_map_link(self, event: QtGui.QDropEvent) -> None:
+        map_def = self._current_map_def()
+        if map_def is None or not self._map_name:
+            event.ignore()
+            return
+        target_map = bytes(event.mimeData().data(MAP_LINK_MIME_TYPE)).decode("utf-8").strip()
+        if not target_map or target_map == self._map_name or self.model.find_map(target_map) is None:
+            event.ignore()
+            return
+        scene_pos = self.mapToScene(event.position().toPoint())
+        map_def.links.append(
+            MapLink(
+                target_map=target_map,
+                x=clamp_int(scene_pos.x(), 0, 99999),
+                y=clamp_int(scene_pos.y(), 0, 99999),
+                size=24,
+            )
+        )
+        self.reload()
+        self.links_changed.emit()
+        event.acceptProposedAction()
+
     def _reset_scene(self) -> None:
         self._close_hover_menu()
         old_scene = self._scene
         self._scene = QtWidgets.QGraphicsScene(self)
         self.setScene(self._scene)
         self._markers.clear()
+        self._link_items.clear()
         self._pix_item = None
         old_scene.deleteLater()
 
@@ -710,6 +877,18 @@ class MapCanvas(QtWidgets.QGraphicsView):
             def on_hovered(marker: MarkerItem) -> None:
                 self._open_stack_menu(marker.key, marker.checks)
 
+            def on_link_moved(link_item: LinkItem, pos: QtCore.QPointF) -> None:
+                link_item.link.x = clamp_int(pos.x(), 0, 99999)
+                link_item.link.y = clamp_int(pos.y(), 0, 99999)
+
+            def on_link_move_finished(_link_item: LinkItem) -> None:
+                self.links_changed.emit()
+
+            def on_link_clicked(link_item: LinkItem) -> None:
+                if self.model.find_map(link_item.link.target_map) is None:
+                    return
+                self.map_link_activated.emit(link_item.link.target_map)
+
             for key, checks in clusters.items():
                 size = max(key[2] if key[2] else 24, MIN_MARKER_DISPLAY_SIZE)
                 marker = MarkerItem(
@@ -723,6 +902,20 @@ class MapCanvas(QtWidgets.QGraphicsView):
                 )
                 self._scene.addItem(marker)
                 self._markers.append(marker)
+
+            for link in map_def.links:
+                size = max(link.size if link.size else 24, MIN_MARKER_DISPLAY_SIZE)
+                link_item = LinkItem(
+                    link=link,
+                    linked_map_name=link.target_map,
+                    check_count=self.model.count_checks_on_map(link.target_map),
+                    size=size,
+                    on_moved=on_link_moved,
+                    on_move_finished=on_link_move_finished,
+                    on_clicked=on_link_clicked,
+                )
+                self._scene.addItem(link_item)
+                self._link_items.append(link_item)
 
             self.setTransform(saved_transform)
             self.horizontalScrollBar().setValue(saved_h)

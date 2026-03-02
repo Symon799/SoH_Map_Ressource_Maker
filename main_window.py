@@ -10,8 +10,25 @@ from typing import Any, Dict, List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from canvas import MapCanvas
-from model import AreaDef, CheckDef, MapDef, MapLocation, PackModel
+from model import AreaDef, CheckDef, MapDef, MapLink, MapLocation, PackModel
 from pack_io import export_pack_to_zip, load_pack_from_zip
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def dialog_start_path(previous_path: Optional[str] = None, default_name: Optional[str] = None) -> str:
+    if previous_path:
+        candidate = Path(previous_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = SCRIPT_DIR / candidate
+        if candidate.exists():
+            return str(candidate)
+        if candidate.parent.exists():
+            return str(candidate.parent)
+    if default_name:
+        return str(SCRIPT_DIR / default_name)
+    return str(SCRIPT_DIR)
 
 
 class AddEditMapDialog(QtWidgets.QDialog):
@@ -57,7 +74,7 @@ class AddEditMapDialog(QtWidgets.QDialog):
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Choose map image",
-            str(Path.home()),
+            dialog_start_path(self.ed_image.text().strip()),
             "Images (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*.*)",
         )
         if fn:
@@ -160,6 +177,92 @@ class AddCheckDialog(QtWidgets.QDialog):
             )
             return
         super().accept()
+
+
+class MapTreeWidget(QtWidgets.QTreeWidget):
+    MAP_LINK_MIME_TYPE = "application/x-soh-map-link"
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self._press_item: Optional[QtWidgets.QTreeWidgetItem] = None
+        self._press_pos: Optional[QtCore.QPoint] = None
+        self._press_column = 0
+        self._dragging_map = False
+
+    def mimeTypes(self) -> List[str]:
+        return [self.MAP_LINK_MIME_TYPE]
+
+    def mimeData(self, items: List[QtWidgets.QTreeWidgetItem]) -> Optional[QtCore.QMimeData]:
+        if not items:
+            return None
+        data = items[0].data(0, QtCore.Qt.UserRole)
+        if not data:
+            return None
+        kind, value = data
+        if kind != "map":
+            return None
+        mime = QtCore.QMimeData()
+        mime.setData(self.MAP_LINK_MIME_TYPE, str(value).encode("utf-8"))
+        return mime
+
+    def _is_map_item(self, item: Optional[QtWidgets.QTreeWidgetItem]) -> bool:
+        if item is None:
+            return False
+        data = item.data(0, QtCore.Qt.UserRole)
+        return bool(data and data[0] == "map")
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            item = self.itemAt(event.pos())
+            if self._is_map_item(item):
+                self._press_item = item
+                self._press_pos = event.pos()
+                self._press_column = max(0, self.columnAt(event.pos().x()))
+                self._dragging_map = False
+                event.accept()
+                return
+        self._press_item = None
+        self._press_pos = None
+        self._dragging_map = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if (
+            event.buttons() & QtCore.Qt.LeftButton
+            and self._press_item is not None
+            and self._press_pos is not None
+            and self._is_map_item(self._press_item)
+        ):
+            if (event.pos() - self._press_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                mime = self.mimeData([self._press_item])
+                if mime is not None:
+                    self._dragging_map = True
+                    drag = QtGui.QDrag(self)
+                    drag.setMimeData(mime)
+                    drag.exec(QtCore.Qt.CopyAction)
+                self._press_item = None
+                self._press_pos = None
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.LeftButton and self._press_item is not None:
+            released_item = self.itemAt(event.pos())
+            if not self._dragging_map and released_item is self._press_item:
+                self.setCurrentItem(self._press_item, self._press_column)
+                self.itemClicked.emit(self._press_item, self._press_column)
+            self._press_item = None
+            self._press_pos = None
+            self._dragging_map = False
+            event.accept()
+            return
+        self._press_item = None
+        self._press_pos = None
+        self._dragging_map = False
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -272,7 +375,7 @@ class MainWindow(QtWidgets.QMainWindow):
         left_btn_row.addWidget(self.btn_edit_map)
         left_layout.addLayout(left_btn_row)
 
-        self.tree = QtWidgets.QTreeWidget()
+        self.tree = MapTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         left_layout.addWidget(self.tree, 1)
@@ -380,11 +483,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_add_map.clicked.connect(self.on_add_map)
         self.btn_edit_map.clicked.connect(self.on_edit_map)
 
-        self.tree.itemSelectionChanged.connect(self.on_tree_selection)
+        self.tree.itemClicked.connect(self.on_tree_item_clicked)
         self.tree.customContextMenuRequested.connect(self.on_tree_context_menu)
         self.canvas.check_selected.connect(self.on_canvas_check_selected)
+        self.canvas.map_link_activated.connect(self.on_canvas_map_link_activated)
         self.canvas.selection_cleared.connect(self.on_canvas_selection_cleared)
         self.canvas.locations_changed.connect(self.on_canvas_locations_changed)
+        self.canvas.links_changed.connect(self.on_canvas_links_changed)
         self.canvas.add_check_requested.connect(self.on_canvas_add_check_requested)
 
         self.search.textChanged.connect(self.refresh_check_list)
@@ -540,7 +645,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.maybe_prompt_export():
             return
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open pack zip", str(Path.home()), "Zip files (*.zip)"
+            self,
+            "Open pack zip",
+            dialog_start_path(str(self.settings.value("recent_zip", ""))),
+            "Zip files (*.zip)",
         )
         if not fn:
             return
@@ -590,7 +698,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if recent:
                 default_export = Path(str(recent))
         if default_export is None:
-            default_export = Path.home() / "soh-map-tracker.zip"
+            default_export = SCRIPT_DIR / "soh-map-tracker.zip"
 
         options = QtWidgets.QFileDialog.Options()
         options |= QtWidgets.QFileDialog.DontConfirmOverwrite
@@ -653,10 +761,12 @@ class MainWindow(QtWidgets.QMainWindow):
         for group_name in sorted(groups.keys()):
             group_item = QtWidgets.QTreeWidgetItem([group_name])
             group_item.setData(0, QtCore.Qt.UserRole, ("group", group_name))
+            group_item.setFlags(group_item.flags() & ~QtCore.Qt.ItemIsDragEnabled)
             self.tree.addTopLevelItem(group_item)
             for map_def in groups[group_name]:
                 map_item = QtWidgets.QTreeWidgetItem([map_def.name])
                 map_item.setData(0, QtCore.Qt.UserRole, ("map", map_def.name))
+                map_item.setFlags(map_item.flags() | QtCore.Qt.ItemIsDragEnabled)
                 group_item.addChild(map_item)
                 if map_def.name == self._current_map:
                     selected_item = map_item
@@ -757,14 +867,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_fit_to_view(self) -> None:
         self.canvas.fit_to_view()
 
-    def on_tree_selection(self) -> None:
-        items = self.tree.selectedItems()
-        if not items:
+    def on_tree_item_clicked(self, item: QtWidgets.QTreeWidgetItem, _column: int) -> None:
+        data = item.data(0, QtCore.Qt.UserRole)
+        if not data:
             return
-        kind, value = items[0].data(0, QtCore.Qt.UserRole)
+        kind, value = data
         if kind == "map":
             self._current_map = value
             self.refresh_canvas()
+            self.refresh_tree()
             self.refresh_check_list()
 
     def on_tree_context_menu(self, pos: QtCore.QPoint) -> None:
@@ -824,6 +935,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     new_checks.append(check)
             area2.checks = new_checks
 
+        for other_map in self.model.maps:
+            other_map.links = [link for link in other_map.links if link.target_map != target]
+
         if self._current_map == target:
             self._current_map = self.model.maps[0].name if self.model.maps else None
         self._selected_ref = None
@@ -869,6 +983,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._select_check_in_list(area, check, ensure_visible=True, emit_signals=False)
         self.refresh_selected_editor()
 
+    def on_canvas_map_link_activated(self, map_name: str) -> None:
+        if not self.model.find_map(map_name):
+            return
+        self._current_map = map_name
+        self._selected_ref = None
+        self.refresh_canvas()
+        self.refresh_tree()
+        self.refresh_check_list()
+        self.refresh_selected_editor()
+
     def on_canvas_selection_cleared(self) -> None:
         self._selected_ref = None
         self.list_checks.blockSignals(True)
@@ -907,6 +1031,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_canvas_locations_changed(self) -> None:
         self.model.changed.emit()
+
+    def on_canvas_links_changed(self) -> None:
+        self.model.changed.emit()
+
     def on_check_fields_changed(self) -> None:
         if not self._selected_ref:
             return
@@ -1094,6 +1222,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 location.x = int(round(location.x * scale_x))
                 location.y = int(round(location.y * scale_y))
 
+        map_def = self.model.find_map(map_name)
+        if map_def is not None:
+            for link in map_def.links:
+                link.x = int(round(link.x * scale_x))
+                link.y = int(round(link.y * scale_y))
+
     def _copy_image_into_pack(self, source_path: str) -> str:
         if not self.model.base_dir:
             raise RuntimeError("No pack loaded.")
@@ -1140,7 +1274,7 @@ class MainWindow(QtWidgets.QMainWindow):
         name, group, image_path = dlg.values()
         try:
             rel_img = self._copy_image_into_pack(image_path)
-            self.model.maps.append(MapDef(name=name, img=rel_img, group=group, extra={}))
+            self.model.maps.append(MapDef(name=name, img=rel_img, group=group, links=[], extra={}))
             if not self.model.find_area(name):
                 self.model.areas.append(AreaDef(area=name, checks=[], extra={}))
             self._current_map = name
@@ -1196,6 +1330,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     old_area.area = new_name
                 elif not new_area:
                     self.model.areas.append(AreaDef(area=new_name, checks=[], extra={}))
+
+                for other_map in self.model.maps:
+                    for link in other_map.links:
+                        if link.target_map == old_name:
+                            link.target_map = new_name
 
                 if self._current_map == old_name:
                     self._current_map = new_name

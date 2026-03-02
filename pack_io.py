@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from model import AreaDef, CheckDef, MapDef, MapLocation, PackModel
+from model import AreaDef, CheckDef, MapDef, MapLink, MapLocation, PackModel
 
 BANNED_MAP_FIELDS = {"location_size", "location_border_thickness"}
 BANNED_CHECK_FIELDS = {"access_rules", "visibility_rules", "item_count"}
@@ -73,13 +73,14 @@ def load_pack_from_zip(model: PackModel, zip_path: Path) -> None:
         extra = {
             k: v
             for k, v in item.items()
-            if k not in {"name", "img", "group"} | BANNED_MAP_FIELDS
+            if k not in {"name", "img", "group", "links"} | BANNED_MAP_FIELDS
         }
         model.maps.append(
             MapDef(
                 name=str(item.get("name", "")),
                 img=str(item.get("img", "")),
                 group=str(item.get("group", "")),
+                links=[MapLink.from_dict(link) for link in item.get("links", [])],
                 extra=extra,
             )
         )
@@ -135,7 +136,12 @@ def export_pack_to_zip(model: PackModel, out_zip: Path, preserve_unknown: bool) 
 
     maps_out: List[Dict[str, Any]] = []
     for m in model.maps:
-        out = {"name": m.name, "img": m.img, "group": m.group}
+        out = {
+            "name": m.name,
+            "img": m.img,
+            "group": m.group,
+            "links": [link.to_dict(preserve_unknown) for link in m.links],
+        }
         if preserve_unknown:
             for k, v in m.extra.items():
                 if k not in BANNED_MAP_FIELDS:

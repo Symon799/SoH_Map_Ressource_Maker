@@ -39,6 +39,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 # Helpers
 # -----------------------------
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 def area_to_filename(area_name: str) -> str:
     # Replace spaces with underscores, keep simple characters
     s = area_name.strip()
@@ -62,6 +64,20 @@ def safe_write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def dialog_start_path(previous_path: Optional[str] = None, default_name: Optional[str] = None) -> str:
+    if previous_path:
+        candidate = Path(previous_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = SCRIPT_DIR / candidate
+        if candidate.exists():
+            return str(candidate)
+        if candidate.parent.exists():
+            return str(candidate.parent)
+    if default_name:
+        return str(SCRIPT_DIR / default_name)
+    return str(SCRIPT_DIR)
 
 
 # -----------------------------
@@ -641,7 +657,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_open(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open pack zip", str(Path.home()), "Zip files (*.zip)"
+            self,
+            "Open pack zip",
+            dialog_start_path(str(self.settings.value("recent_zip", ""))),
+            "Zip files (*.zip)",
         )
         if not fn:
             return
@@ -673,7 +692,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_export(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Export pack zip", str(Path.home()), "Zip files (*.zip)"
+            self,
+            "Export pack zip",
+            dialog_start_path(str(self.settings.value("recent_zip", "")), "soh-map-tracker.zip"),
+            "Zip files (*.zip)",
         )
         if not fn:
             return
