@@ -327,6 +327,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
     selection_cleared = QtCore.Signal()
     locations_changed = QtCore.Signal()
     links_changed = QtCore.Signal()
+    remove_checks_requested = QtCore.Signal(object)
     add_check_requested = QtCore.Signal(str, int, int)
 
     def __init__(self, model: PackModel) -> None:
@@ -482,6 +483,11 @@ class MapCanvas(QtWidgets.QGraphicsView):
             self._left_press_moved = False
 
         if event.button() == QtCore.Qt.RightButton and self._map_name:
+            marker = self._item_to_marker(self.itemAt(event.pos()))
+            if marker is not None:
+                self._open_marker_context_menu(event.pos(), marker)
+                event.accept()
+                return
             scene_pos = self.mapToScene(event.pos())
             x = clamp_int(scene_pos.x(), 0, 99999)
             y = clamp_int(scene_pos.y(), 0, 99999)
@@ -542,6 +548,16 @@ class MapCanvas(QtWidgets.QGraphicsView):
         if item is not None and isinstance(item.parentItem(), MarkerItem):
             return item.parentItem()  # type: ignore[return-value]
         return None
+
+    def _open_marker_context_menu(self, view_pos: QtCore.QPoint, marker: MarkerItem) -> None:
+        menu = QtWidgets.QMenu(self)
+        if len(marker.checks) == 1:
+            action = menu.addAction("Remove check from map")
+        else:
+            action = menu.addAction("Remove multicheck from map")
+        chosen = menu.exec(self.mapToGlobal(view_pos))
+        if chosen is action:
+            self.remove_checks_requested.emit(list(marker.checks))
 
     def _maybe_close_hover_menu(self, view_pos: QtCore.QPoint) -> None:
         if not self._hover_menu or not self._hover_menu.isVisible():

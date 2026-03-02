@@ -490,6 +490,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.selection_cleared.connect(self.on_canvas_selection_cleared)
         self.canvas.locations_changed.connect(self.on_canvas_locations_changed)
         self.canvas.links_changed.connect(self.on_canvas_links_changed)
+        self.canvas.remove_checks_requested.connect(self.on_canvas_remove_checks_requested)
         self.canvas.add_check_requested.connect(self.on_canvas_add_check_requested)
 
         self.search.textChanged.connect(self.refresh_check_list)
@@ -1034,6 +1035,49 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_canvas_links_changed(self) -> None:
         self.model.changed.emit()
+
+    def on_canvas_remove_checks_requested(
+        self,
+        checks_to_remove: List[Tuple[AreaDef, CheckDef, MapLocation]],
+    ) -> None:
+        if not checks_to_remove or not self._current_map:
+            return
+
+        removed_locations = 0
+        deleted_checks = 0
+        removed_selected_check = False
+
+        for area, check, location in checks_to_remove:
+            if location.map != self._current_map:
+                continue
+            try:
+                check.map_locations.remove(location)
+                removed_locations += 1
+            except ValueError:
+                continue
+
+            if not check.map_locations:
+                try:
+                    area.checks.remove(check)
+                    deleted_checks += 1
+                    if self._selected_ref and self._selected_ref[0] is area and self._selected_ref[1] is check:
+                        removed_selected_check = True
+                except ValueError:
+                    pass
+
+        if removed_locations == 0:
+            return
+
+        if removed_selected_check:
+            self._selected_ref = None
+
+        self.model.changed.emit()
+        if deleted_checks > 0:
+            self.show_status(
+                f"Removed {removed_locations} marker location(s) from map and deleted {deleted_checks} check(s)"
+            )
+        else:
+            self.show_status(f"Removed {removed_locations} marker location(s) from map")
 
     def on_check_fields_changed(self) -> None:
         if not self._selected_ref:
