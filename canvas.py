@@ -483,7 +483,13 @@ class MapCanvas(QtWidgets.QGraphicsView):
             self._left_press_moved = False
 
         if event.button() == QtCore.Qt.RightButton and self._map_name:
-            marker = self._item_to_marker(self.itemAt(event.pos()))
+            item = self.itemAt(event.pos())
+            link_item = self._item_to_link(item)
+            if link_item is not None:
+                self._open_link_context_menu(event.pos(), link_item)
+                event.accept()
+                return
+            marker = self._item_to_marker(item)
             if marker is not None:
                 self._open_marker_context_menu(event.pos(), marker)
                 event.accept()
@@ -549,6 +555,13 @@ class MapCanvas(QtWidgets.QGraphicsView):
             return item.parentItem()  # type: ignore[return-value]
         return None
 
+    def _item_to_link(self, item: Optional[QtWidgets.QGraphicsItem]) -> Optional[LinkItem]:
+        if isinstance(item, LinkItem):
+            return item
+        if item is not None and isinstance(item.parentItem(), LinkItem):
+            return item.parentItem()  # type: ignore[return-value]
+        return None
+
     def _open_marker_context_menu(self, view_pos: QtCore.QPoint, marker: MarkerItem) -> None:
         menu = QtWidgets.QMenu(self)
         if len(marker.checks) == 1:
@@ -558,6 +571,22 @@ class MapCanvas(QtWidgets.QGraphicsView):
         chosen = menu.exec(self.mapToGlobal(view_pos))
         if chosen is action:
             self.remove_checks_requested.emit(list(marker.checks))
+
+    def _open_link_context_menu(self, view_pos: QtCore.QPoint, link_item: LinkItem) -> None:
+        menu = QtWidgets.QMenu(self)
+        action = menu.addAction("Remove link from map")
+        chosen = menu.exec(self.mapToGlobal(view_pos))
+        if chosen is not action:
+            return
+        map_def = self._current_map_def()
+        if map_def is None:
+            return
+        try:
+            map_def.links.remove(link_item.link)
+        except ValueError:
+            return
+        self.reload()
+        self.links_changed.emit()
 
     def _maybe_close_hover_menu(self, view_pos: QtCore.QPoint) -> None:
         if not self._hover_menu or not self._hover_menu.isVisible():
