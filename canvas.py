@@ -365,8 +365,8 @@ class MapCanvas(QtWidgets.QGraphicsView):
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
 
-    def set_map(self, map_name: str) -> None:
-        self._map_name = map_name
+    def set_map(self, map_key: str) -> None:
+        self._map_name = map_key
         self.resetTransform()
         self.reload()
         self.fit_to_view()
@@ -499,9 +499,11 @@ class MapCanvas(QtWidgets.QGraphicsView):
             y = clamp_int(scene_pos.y(), 0, 99999)
             menu = QtWidgets.QMenu(self)
             add_here = menu.addAction("Add check here…")
+            current_map = self._current_map_def()
+            add_here.setEnabled(current_map is not None and bool(current_map.id))
             chosen = menu.exec(self.mapToGlobal(event.pos()))
-            if chosen is add_here:
-                self.add_check_requested.emit(self._map_name, x, y)
+            if chosen is add_here and current_map is not None and current_map.id:
+                self.add_check_requested.emit(current_map.id, x, y)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -679,7 +681,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
         seen: set[Tuple[str, int, int, int]] = set()
         kept: List[MapLocation] = []
         for location in check.map_locations:
-            key = (location.map, int(location.x), int(location.y), int(location.size))
+            key = (location.map_id, int(location.x), int(location.y), int(location.size))
             if key in seen:
                 continue
             seen.add(key)
@@ -798,10 +800,14 @@ class MapCanvas(QtWidgets.QGraphicsView):
         if not payload:
             event.ignore()
             return
+        current_map = self._current_map_def()
+        if current_map is None or not current_map.id:
+            event.ignore()
+            return
         area, check, location = payload
         pos = event.position().toPoint()
         scene_pos = self.mapToScene(pos)
-        location.map = self._map_name
+        location.map_id = current_map.id
         merge_target = self._find_merge_target(scene_pos, excluded_locations={id(location)})
         if merge_target is not None:
             location.x = merge_target.key[0]
@@ -821,17 +827,21 @@ class MapCanvas(QtWidgets.QGraphicsView):
 
     def _drop_map_link(self, event: QtGui.QDropEvent) -> None:
         map_def = self._current_map_def()
-        if map_def is None or not self._map_name:
+        if map_def is None or not map_def.id:
             event.ignore()
             return
-        target_map = bytes(event.mimeData().data(MAP_LINK_MIME_TYPE)).decode("utf-8").strip()
-        if not target_map or target_map == self._map_name or self.model.find_map(target_map) is None:
+        target_map_id = bytes(event.mimeData().data(MAP_LINK_MIME_TYPE)).decode("utf-8").strip()
+        if (
+            not target_map_id
+            or target_map_id == map_def.id
+            or self.model.find_map_by_id(target_map_id) is None
+        ):
             event.ignore()
             return
         scene_pos = self.mapToScene(event.position().toPoint())
         map_def.links.append(
             MapLink(
-                target_map=target_map,
+                target_map_id=target_map_id,
                 x=clamp_int(scene_pos.x(), 0, 99999),
                 y=clamp_int(scene_pos.y(), 0, 99999),
                 size=24,
@@ -883,7 +893,7 @@ class MapCanvas(QtWidgets.QGraphicsView):
             clusters: Dict[Tuple[int, int, int], List[Tuple[AreaDef, CheckDef, MapLocation]]] = {}
             for area, check in self.model.all_checks():
                 for ml in check.map_locations:
-                    if ml.map != self._map_name:
+                    if not map_def.id or ml.map_id != map_def.id:
                         continue
                     key = (int(ml.x), int(ml.y), int(ml.size))
                     clusters.setdefault(key, []).append((area, check, ml))
@@ -930,9 +940,9 @@ class MapCanvas(QtWidgets.QGraphicsView):
                 self.links_changed.emit()
 
             def on_link_clicked(link_item: LinkItem) -> None:
-                if self.model.find_map(link_item.link.target_map) is None:
+                if self.model.find_map_by_id(link_item.link.target_map_id) is None:
                     return
-                self.map_link_activated.emit(link_item.link.target_map)
+                self.map_link_activated.emit(link_item.link.target_map_id)
 
             for key, checks in clusters.items():
                 size = max(key[2] if key[2] else 24, MIN_MARKER_DISPLAY_SIZE)
@@ -952,8 +962,8 @@ class MapCanvas(QtWidgets.QGraphicsView):
                 size = max(link.size if link.size else 24, MIN_MARKER_DISPLAY_SIZE)
                 link_item = LinkItem(
                     link=link,
-                    linked_map_name=link.target_map,
-                    check_count=self.model.count_checks_on_map(link.target_map),
+                    linked_map_name=self.model.display_name_for_map_id(link.target_map_id),
+                    check_count=self.model.count_checks_on_map(link.target_map_id),
                     size=size,
                     on_moved=on_link_moved,
                     on_move_finished=on_link_move_finished,

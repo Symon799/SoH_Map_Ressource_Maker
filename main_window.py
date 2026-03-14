@@ -37,7 +37,11 @@ class AddEditMapDialog(QtWidgets.QDialog):
         parent: QtWidgets.QWidget,
         title: str,
         existing_names: List[str],
+        allowed_map_ids: List[str],
+        existing_ids: List[str],
         original_name: Optional[str] = None,
+        original_id: Optional[str] = None,
+        initial_id: str = "",
         initial_name: str = "",
         initial_group: str = "",
         initial_image: str = "",
@@ -45,9 +49,24 @@ class AddEditMapDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self._existing_names = set(existing_names)
+        self._allowed_map_ids = allowed_map_ids
+        self._allowed_map_id_set = set(allowed_map_ids)
+        self._existing_ids = set(existing_ids)
         self._original_name = original_name
+        self._original_id = original_id
 
         layout = QtWidgets.QFormLayout(self)
+        self.cb_id = QtWidgets.QComboBox()
+        self.cb_id.setEditable(True)
+        self.cb_id.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.cb_id.addItems(self._allowed_map_ids)
+        self.cb_id.setCurrentText(initial_id)
+        self.cb_id.setMaxVisibleItems(20)
+        id_completer = QtWidgets.QCompleter(self._allowed_map_ids, self.cb_id)
+        id_completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        id_completer.setFilterMode(QtCore.Qt.MatchContains)
+        id_completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
+        self.cb_id.setCompleter(id_completer)
         self.ed_name = QtWidgets.QLineEdit(initial_name)
         self.ed_group = QtWidgets.QLineEdit(initial_group)
         self.ed_image = QtWidgets.QLineEdit(initial_image)
@@ -56,6 +75,7 @@ class AddEditMapDialog(QtWidgets.QDialog):
         image_row.addWidget(self.ed_image, 1)
         image_row.addWidget(self.btn_browse)
 
+        layout.addRow("Id", self.cb_id)
         layout.addRow("Name", self.ed_name)
         layout.addRow("Group", self.ed_group)
         layout.addRow("Image", image_row)
@@ -68,7 +88,7 @@ class AddEditMapDialog(QtWidgets.QDialog):
         self.btn_browse.clicked.connect(self.on_browse)
         self.btns.accepted.connect(self.accept)
         self.btns.rejected.connect(self.reject)
-        self.resize(620, 120)
+        self.resize(620, 155)
 
     def on_browse(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -80,15 +100,29 @@ class AddEditMapDialog(QtWidgets.QDialog):
         if fn:
             self.ed_image.setText(fn)
 
-    def values(self) -> Tuple[str, str, str]:
+    def values(self) -> Tuple[str, str, str, str]:
         return (
+            self.cb_id.currentText().strip(),
             self.ed_name.text().strip(),
             self.ed_group.text().strip(),
             self.ed_image.text().strip(),
         )
 
     def accept(self) -> None:
-        name, _, image = self.values()
+        map_id, name, _, image = self.values()
+        if not map_id:
+            QtWidgets.QMessageBox.warning(self, "Validation", "Map id is required.")
+            return
+        if self._allowed_map_ids and map_id not in self._allowed_map_id_set:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Validation",
+                "Map id must be selected from the allowed map ids list.",
+            )
+            return
+        if map_id in self._existing_ids and map_id != self._original_id:
+            QtWidgets.QMessageBox.warning(self, "Validation", f"Map id '{map_id}' already exists.")
+            return
         if not name:
             QtWidgets.QMessageBox.warning(self, "Validation", "Map name is required.")
             return
@@ -179,6 +213,113 @@ class AddCheckDialog(QtWidgets.QDialog):
         super().accept()
 
 
+class EditLocationDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget,
+        title: str,
+        available_maps: List[MapDef],
+        initial_map_id: str = "",
+        initial_x: int = 0,
+        initial_y: int = 0,
+        initial_size: int = 24,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self._valid_map_ids = [map_def.id for map_def in available_maps if map_def.id]
+        self._valid_map_id_set = set(self._valid_map_ids)
+        self._label_to_map_id: Dict[str, str] = {}
+
+        layout = QtWidgets.QFormLayout(self)
+
+        self.cb_map = QtWidgets.QComboBox()
+        self.cb_map.setEditable(True)
+        self.cb_map.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.cb_map.setMaxVisibleItems(20)
+        labels: List[str] = []
+        for map_def in available_maps:
+            if not map_def.id:
+                continue
+            label = f"{map_def.name} [{map_def.id}]"
+            self.cb_map.addItem(label, map_def.id)
+            self._label_to_map_id[label] = map_def.id
+            labels.append(label)
+
+        if initial_map_id and initial_map_id not in self._valid_map_id_set:
+            missing_label = f"{initial_map_id} (missing from pack)"
+            self.cb_map.addItem(missing_label, initial_map_id)
+            self._label_to_map_id[missing_label] = initial_map_id
+            labels.append(missing_label)
+
+        completer = QtWidgets.QCompleter(labels, self.cb_map)
+        completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        completer.setFilterMode(QtCore.Qt.MatchContains)
+        completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
+        self.cb_map.setCompleter(completer)
+        if self.cb_map.lineEdit():
+            self.cb_map.lineEdit().setPlaceholderText("Select a map from this pack")
+
+        current_index = self.cb_map.findData(initial_map_id)
+        if current_index >= 0:
+            self.cb_map.setCurrentIndex(current_index)
+        else:
+            self.cb_map.setEditText(initial_map_id)
+
+        self.sp_x = QtWidgets.QSpinBox()
+        self.sp_x.setRange(-99999, 99999)
+        self.sp_x.setValue(initial_x)
+        self.sp_y = QtWidgets.QSpinBox()
+        self.sp_y.setRange(-99999, 99999)
+        self.sp_y.setValue(initial_y)
+        self.sp_size = QtWidgets.QSpinBox()
+        self.sp_size.setRange(1, 99999)
+        self.sp_size.setValue(max(1, initial_size))
+
+        layout.addRow("Map id", self.cb_map)
+        layout.addRow("X", self.sp_x)
+        layout.addRow("Y", self.sp_y)
+        layout.addRow("Size", self.sp_size)
+
+        self.btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        self.btns.accepted.connect(self.accept)
+        self.btns.rejected.connect(self.reject)
+        layout.addRow(self.btns)
+        self.resize(560, 180)
+
+    def _selected_map_id(self) -> str:
+        text = self.cb_map.currentText().strip()
+        index = self.cb_map.currentIndex()
+        if index >= 0 and self.cb_map.itemText(index).strip() == text:
+            data = self.cb_map.itemData(index)
+            if isinstance(data, str):
+                return data.strip()
+        return self._label_to_map_id.get(text, text)
+
+    def values(self) -> Tuple[str, int, int, int]:
+        return (
+            self._selected_map_id(),
+            self.sp_x.value(),
+            self.sp_y.value(),
+            self.sp_size.value(),
+        )
+
+    def accept(self) -> None:
+        map_id, _, _, _ = self.values()
+        if not map_id:
+            QtWidgets.QMessageBox.warning(self, "Validation", "Map id is required.")
+            return
+        if self._valid_map_id_set and map_id not in self._valid_map_id_set:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Validation",
+                "Map id must match a map in this pack.",
+            )
+            return
+        super().accept()
+
+
 class MapTreeWidget(QtWidgets.QTreeWidget):
     MAP_LINK_MIME_TYPE = "application/x-soh-map-link"
 
@@ -200,11 +341,14 @@ class MapTreeWidget(QtWidgets.QTreeWidget):
         data = items[0].data(0, QtCore.Qt.UserRole)
         if not data:
             return None
-        kind, value = data
+        kind, _value = data
         if kind != "map":
             return None
+        map_id = str(items[0].data(0, QtCore.Qt.UserRole + 1) or "").strip()
+        if not map_id:
+            return None
         mime = QtCore.QMimeData()
-        mime.setData(self.MAP_LINK_MIME_TYPE, str(value).encode("utf-8"))
+        mime.setData(self.MAP_LINK_MIME_TYPE, map_id.encode("utf-8"))
         return mime
 
     def _is_map_item(self, item: Optional[QtWidgets.QTreeWidgetItem]) -> bool:
@@ -277,7 +421,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._current_map: Optional[str] = None
         self._selected_ref: Optional[Tuple[AreaDef, CheckDef]] = None
-        self._suspend_table_events = False
         self._suspend_dirty_tracking = False
         self._restoring_history = False
         self._dirty = False
@@ -287,9 +430,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._history_index = -1
         self._saved_history_index = -1
         self._history_limit = 200
-        self._toggle_location_cell_on_click = False
         self._allowed_soh_ids = self._load_allowed_soh_ids()
         self._allowed_soh_set = set(self._allowed_soh_ids)
+        self._allowed_map_ids = self._load_allowed_map_ids()
+        self._allowed_map_id_set = set(self._allowed_map_ids)
 
         self._build_ui()
         self._apply_view_selection_palettes()
@@ -345,9 +489,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_view_selection_palettes()
         super().changeEvent(event)
 
-    def _load_allowed_soh_ids(self) -> List[str]:
+    def _load_text_choices(self, filename: str) -> List[str]:
         script_dir = Path(__file__).resolve().parent
-        candidates = [script_dir / "in_game_checks.txt"]
+        candidates = [script_dir / filename]
         for path in candidates:
             if not path.exists():
                 continue
@@ -359,6 +503,55 @@ class MainWindow(QtWidgets.QMainWindow):
             # Preserve source order, drop duplicates.
             return list(dict.fromkeys(ids))
         return []
+
+    def _load_allowed_soh_ids(self) -> List[str]:
+        return self._load_text_choices("in_game_checks.txt")
+
+    def _load_allowed_map_ids(self) -> List[str]:
+        return self._load_text_choices("map_tracker_map_ids.txt")
+
+    def _map_label(self, map_def: MapDef) -> str:
+        if map_def.id:
+            return f"{map_def.name} [{map_def.id}]"
+        return f"{map_def.name} [missing id]"
+
+    def _tree_map_label(self, map_def: MapDef) -> str:
+        return map_def.name or map_def.id or "(unnamed map)"
+
+    def _map_label_for_id(self, map_id: str) -> str:
+        return self.model.format_map_label(map_id)
+
+    def _set_current_map(self, map_def: Optional[MapDef]) -> None:
+        self._current_map = map_def.editor_key() if map_def is not None else None
+
+    def _current_map_id(self) -> str:
+        map_def = self._current_map_def()
+        if map_def is None:
+            return ""
+        return map_def.id
+
+    def _find_area_for_new_check(self, map_def: MapDef) -> AreaDef:
+        if map_def.id:
+            for area, check in self.model.all_checks():
+                if any(location.map_id == map_def.id for location in check.map_locations):
+                    return area
+        preferred_names = [text for text in (map_def.id, map_def.name) if text]
+        for preferred_name in preferred_names:
+            area = self.model.find_area(preferred_name)
+            if area is not None:
+                return area
+        area_name = map_def.id or map_def.name or "checks"
+        area = AreaDef(area=area_name, checks=[], extra={})
+        self.model.areas.append(area)
+        return area
+
+    def _prune_empty_areas(self) -> None:
+        self.model.areas = [area for area in self.model.areas if area.checks]
+
+    def _show_load_warnings(self) -> None:
+        if not self.model.load_warnings:
+            return
+        QtWidgets.QMessageBox.warning(self, "Outdated Pack", "\n\n".join(self.model.load_warnings))
 
     def _build_ui(self) -> None:
         self._build_toolbar()
@@ -423,17 +616,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tbl_locations = QtWidgets.QTableWidget(0, 4)
         self.tbl_locations.setHorizontalHeaderLabels(["Map", "X", "Y", "Size"])
-        self.tbl_locations.horizontalHeader().setStretchLastSection(True)
         self.tbl_locations.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.tbl_locations.setFixedHeight(150)
+        self.tbl_locations.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl_locations.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl_locations.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.tbl_locations.verticalHeader().setVisible(False)
+        header = self.tbl_locations.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        self.tbl_locations.setFixedHeight(170)
         form_layout.addRow(self.tbl_locations)
-
-        loc_btn_row = QtWidgets.QHBoxLayout()
-        self.btn_add_loc = QtWidgets.QPushButton("Add location")
-        self.btn_del_loc = QtWidgets.QPushButton("Remove location")
-        loc_btn_row.addWidget(self.btn_add_loc)
-        loc_btn_row.addWidget(self.btn_del_loc)
-        right_layout.addLayout(loc_btn_row)
 
     def _build_toolbar(self) -> None:
         tb = self.addToolBar("Main")
@@ -503,14 +698,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.cb_soh.lineEdit():
             self.cb_soh.lineEdit().editingFinished.connect(self.on_check_fields_changed)
         self.cb_soh.activated.connect(lambda _idx: self.on_check_fields_changed())
-        self.tbl_locations.itemChanged.connect(self.on_locations_table_changed)
+        self.tbl_locations.customContextMenuRequested.connect(self.on_locations_context_menu)
         self.tbl_locations.currentCellChanged.connect(self.on_location_row_selected)
         self.tbl_locations.itemSelectionChanged.connect(self.on_location_selection_changed)
-        self.tbl_locations.cellPressed.connect(self.on_location_cell_pressed)
         self.tbl_locations.cellClicked.connect(self.on_location_cell_clicked)
-
-        self.btn_add_loc.clicked.connect(self.on_add_location)
-        self.btn_del_loc.clicked.connect(self.on_del_location)
+        self.tbl_locations.cellDoubleClicked.connect(self.on_location_cell_double_clicked)
 
     def _snapshot_state(self) -> Dict[str, Any]:
         return {
@@ -665,6 +857,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.refresh_ui()
             self._reset_history()
             self._update_current_zip_label()
+            self._show_load_warnings()
             self.show_status(f"Loaded zip: {path}")
         except Exception as exc:
             self._suspend_dirty_tracking = False
@@ -687,6 +880,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.refresh_ui()
             self._reset_history()
             self._update_current_zip_label()
+            self._show_load_warnings()
             self.show_status(f"Loaded zip: {path}")
         except Exception as exc:
             self._suspend_dirty_tracking = False
@@ -765,11 +959,13 @@ class MainWindow(QtWidgets.QMainWindow):
             group_item.setFlags(group_item.flags() & ~QtCore.Qt.ItemIsDragEnabled)
             self.tree.addTopLevelItem(group_item)
             for map_def in groups[group_name]:
-                map_item = QtWidgets.QTreeWidgetItem([map_def.name])
-                map_item.setData(0, QtCore.Qt.UserRole, ("map", map_def.name))
+                map_item = QtWidgets.QTreeWidgetItem([self._tree_map_label(map_def)])
+                map_item.setToolTip(0, self._map_label(map_def))
+                map_item.setData(0, QtCore.Qt.UserRole, ("map", map_def.editor_key()))
+                map_item.setData(0, QtCore.Qt.UserRole + 1, map_def.id)
                 map_item.setFlags(map_item.flags() | QtCore.Qt.ItemIsDragEnabled)
                 group_item.addChild(map_item)
-                if map_def.name == self._current_map:
+                if map_def.editor_key() == self._current_map:
                     selected_item = map_item
             group_item.setExpanded(True)
 
@@ -784,7 +980,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         if self._current_map is None or not self.model.find_map(self._current_map):
-            self._current_map = self.model.maps[0].name
+            self._set_current_map(self.model.maps[0])
 
         if not self._current_map:
             self.canvas.clear_map()
@@ -805,15 +1001,15 @@ class MainWindow(QtWidgets.QMainWindow):
         query = self.search.text().strip().lower()
         keep = self._selected_ref
         filter_current_map = self.chk_filter_current_map.isChecked()
-        current_map = self._current_map
+        current_map_id = self._current_map_id()
 
         self.list_checks.blockSignals(True)
         self.list_checks.clear()
         for area, check in self.model.all_checks():
             if filter_current_map:
-                if not current_map:
+                if not current_map_id:
                     continue
-                if not any(loc.map == current_map for loc in check.map_locations):
+                if not any(loc.map_id == current_map_id for loc in check.map_locations):
                     continue
             if query and (query not in check.name.lower() and query not in check.soh_id.lower()):
                 continue
@@ -853,17 +1049,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_hint.setText(check.hint)
         self.cb_soh.setEditText(check.soh_id)
 
-        self._suspend_table_events = True
+        self.tbl_locations.blockSignals(True)
+        self.tbl_locations.clearSelection()
         self.tbl_locations.setRowCount(0)
         for location in check.map_locations:
             row = self.tbl_locations.rowCount()
             self.tbl_locations.insertRow(row)
-            self.tbl_locations.setItem(row, 0, QtWidgets.QTableWidgetItem(location.map))
+            map_label = self._map_label_for_id(location.map_id)
+            map_item = QtWidgets.QTableWidgetItem(map_label)
+            map_item.setToolTip(map_label)
+            map_item.setData(QtCore.Qt.UserRole, location.map_id)
+            self.tbl_locations.setItem(row, 0, map_item)
             self.tbl_locations.setItem(row, 1, QtWidgets.QTableWidgetItem(str(location.x)))
             self.tbl_locations.setItem(row, 2, QtWidgets.QTableWidgetItem(str(location.y)))
             self.tbl_locations.setItem(row, 3, QtWidgets.QTableWidgetItem(str(location.size)))
-        self._suspend_table_events = False
+        self.tbl_locations.setCurrentItem(None)
+        self.tbl_locations.blockSignals(False)
         self.canvas.set_selected_check(area, check)
+        self.canvas.set_selected_location(area, check, None)
 
     def on_fit_to_view(self) -> None:
         self.canvas.fit_to_view()
@@ -890,20 +1093,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if kind != "map":
             return
 
-        map_name = str(value)
+        map_key = str(value)
         menu = QtWidgets.QMenu(self.tree)
         act_edit = menu.addAction("Edit map")
         act_delete = menu.addAction("Delete map")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is act_edit:
-            self._current_map = map_name
+            self._current_map = map_key
             self.on_edit_map()
             return
         if chosen is act_delete:
-            self.on_delete_map(map_name)
+            self.on_delete_map(map_key)
 
-    def on_delete_map(self, map_name: Optional[str] = None) -> None:
-        target = map_name or self._current_map
+    def on_delete_map(self, map_key: Optional[str] = None) -> None:
+        target = map_key or self._current_map
         if not target:
             return
         map_def = self.model.find_map(target)
@@ -913,7 +1116,7 @@ class MainWindow(QtWidgets.QMainWindow):
         answer = QtWidgets.QMessageBox.question(
             self,
             "Delete Map",
-            f"Delete map '{target}' and its linked checks?",
+            f"Delete map '{self._map_label(map_def)}' and its linked checks?",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
         )
         if answer != QtWidgets.QMessageBox.Yes:
@@ -922,28 +1125,24 @@ class MainWindow(QtWidgets.QMainWindow):
         # Drop the map definition.
         self.model.maps = [m for m in self.model.maps if m is not map_def]
 
-        # Remove matching map area (map-centric workflow).
-        area = self.model.find_area(target)
-        if area and area in self.model.areas:
-            self.model.areas.remove(area)
-
         # Remove map locations that target this map from remaining checks.
         for area2 in self.model.areas:
             new_checks: List[CheckDef] = []
             for check in area2.checks:
-                check.map_locations = [ml for ml in check.map_locations if ml.map != target]
+                check.map_locations = [ml for ml in check.map_locations if ml.map_id != map_def.id]
                 if check.map_locations:
                     new_checks.append(check)
             area2.checks = new_checks
 
         for other_map in self.model.maps:
-            other_map.links = [link for link in other_map.links if link.target_map != target]
+            other_map.links = [link for link in other_map.links if link.target_map_id != map_def.id]
 
+        self._prune_empty_areas()
         if self._current_map == target:
-            self._current_map = self.model.maps[0].name if self.model.maps else None
+            self._set_current_map(self.model.maps[0] if self.model.maps else None)
         self._selected_ref = None
         self.model.changed.emit()
-        self.show_status(f"Deleted map: {target}")
+        self.show_status(f"Deleted map: {self._map_label(map_def)}")
 
     def _select_check_in_list(
         self,
@@ -984,10 +1183,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._select_check_in_list(area, check, ensure_visible=True, emit_signals=False)
         self.refresh_selected_editor()
 
-    def on_canvas_map_link_activated(self, map_name: str) -> None:
-        if not self.model.find_map(map_name):
+    def on_canvas_map_link_activated(self, map_id: str) -> None:
+        map_def = self.model.find_map_by_id(map_id)
+        if map_def is None:
             return
-        self._current_map = map_name
+        self._set_current_map(map_def)
         self._selected_ref = None
         self.refresh_canvas()
         self.refresh_tree()
@@ -1040,7 +1240,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         checks_to_remove: List[Tuple[AreaDef, CheckDef, MapLocation]],
     ) -> None:
-        if not checks_to_remove or not self._current_map:
+        current_map_id = self._current_map_id()
+        if not checks_to_remove or not current_map_id:
             return
 
         removed_locations = 0
@@ -1048,7 +1249,7 @@ class MainWindow(QtWidgets.QMainWindow):
         removed_selected_check = False
 
         for area, check, location in checks_to_remove:
-            if location.map != self._current_map:
+            if location.map_id != current_map_id:
                 continue
             try:
                 check.map_locations.remove(location)
@@ -1071,6 +1272,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if removed_selected_check:
             self._selected_ref = None
 
+        self._prune_empty_areas()
         self.model.changed.emit()
         if deleted_checks > 0:
             self.show_status(
@@ -1101,42 +1303,33 @@ class MainWindow(QtWidgets.QMainWindow):
         check.soh_id = new_soh
         self.model.changed.emit()
 
-    def on_locations_table_changed(self, item: QtWidgets.QTableWidgetItem) -> None:
-        if self._suspend_table_events or not self._selected_ref:
+    def on_locations_context_menu(self, pos: QtCore.QPoint) -> None:
+        if not self._selected_ref:
             return
-        _, check = self._selected_ref
-        row = item.row()
-        if row < 0 or row >= len(check.map_locations):
-            return
-        location = check.map_locations[row]
+        item = self.tbl_locations.itemAt(pos)
+        row = item.row() if item is not None else -1
+        if row >= 0:
+            self.tbl_locations.selectRow(row)
+        else:
+            self.tbl_locations.clearSelection()
+            self.tbl_locations.setCurrentItem(None)
 
-        try:
-            if item.column() == 0:
-                new_val = item.text().strip()
-                if location.map == new_val:
-                    return
-                location.map = new_val
-            elif item.column() == 1:
-                new_val = int(item.text())
-                if location.x == new_val:
-                    return
-                location.x = new_val
-            elif item.column() == 2:
-                new_val = int(item.text())
-                if location.y == new_val:
-                    return
-                location.y = new_val
-            elif item.column() == 3:
-                new_val = int(item.text())
-                if location.size == new_val:
-                    return
-                location.size = new_val
-            else:
-                return
-            self.model.changed.emit()
-            self.canvas.reload()
-        except ValueError:
-            pass
+        menu = QtWidgets.QMenu(self.tbl_locations)
+        act_add = menu.addAction("Add location")
+        act_edit = menu.addAction("Edit location")
+        act_delete = menu.addAction("Delete location")
+        act_edit.setEnabled(row >= 0)
+        act_delete.setEnabled(row >= 0)
+
+        chosen = menu.exec(self.tbl_locations.viewport().mapToGlobal(pos))
+        if chosen is act_add:
+            self.on_add_location()
+            return
+        if chosen is act_edit:
+            self.on_edit_location(row)
+            return
+        if chosen is act_delete:
+            self.on_del_location(row)
 
     def on_location_row_selected(
         self,
@@ -1148,18 +1341,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._selected_ref:
             return
         area, check = self._selected_ref
-        if current_row < 0 or current_column != 0:
+        if current_row < 0:
             self.canvas.set_selected_location(area, check, None)
             return
         if current_row >= len(check.map_locations):
             return
         location = check.map_locations[current_row]
-        if location.map:
-            self._current_map = location.map
-            self.refresh_canvas()
-            self.refresh_tree()
-            self.refresh_check_list()
-            self._select_check_in_list(area, check, ensure_visible=False, emit_signals=False)
         self.canvas.set_selected_location(area, check, location)
 
     def on_location_selection_changed(self) -> None:
@@ -1170,55 +1357,137 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.canvas.set_selected_location(area, check, None)
 
-    def on_location_cell_pressed(self, row: int, column: int) -> None:
-        item = self.tbl_locations.item(row, column)
-        current = self.tbl_locations.currentItem()
-        self._toggle_location_cell_on_click = (
-            column == 0 and item is not None and current is item and item.isSelected()
-        )
+    def on_location_cell_clicked(self, row: int, _column: int) -> None:
+        if not self._selected_ref:
+            return
+        area, check = self._selected_ref
+        if row < 0 or row >= len(check.map_locations):
+            return
 
-    def on_location_cell_clicked(self, row: int, column: int) -> None:
-        if column != 0:
-            self._toggle_location_cell_on_click = False
-            if self._selected_ref:
-                area, check = self._selected_ref
-                self.canvas.set_selected_location(area, check, None)
+        location = check.map_locations[row]
+        map_def = self.model.find_map_by_id(location.map_id)
+        if map_def is None:
             return
-        if not self._toggle_location_cell_on_click:
+
+        if map_def.editor_key() != self._current_map:
+            self._set_current_map(map_def)
+            self.refresh_tree()
+            self.refresh_canvas()
+            self.refresh_check_list()
+
+        self.canvas.set_selected_location(area, check, location)
+
+    def on_location_cell_double_clicked(self, row: int, _column: int) -> None:
+        self.on_edit_location(row)
+
+    def _available_location_maps(self) -> List[MapDef]:
+        return [map_def for map_def in self.model.maps if map_def.id]
+
+    def _select_location_row(self, row: int) -> None:
+        if row < 0 or row >= self.tbl_locations.rowCount():
             return
-        self._toggle_location_cell_on_click = False
-        self.tbl_locations.blockSignals(True)
-        self.tbl_locations.clearSelection()
-        self.tbl_locations.setCurrentItem(None)
-        self.tbl_locations.blockSignals(False)
-        if self._selected_ref:
-            area, check = self._selected_ref
-            self.canvas.set_selected_location(area, check, None)
+        self.tbl_locations.setCurrentCell(row, 0)
+        self.tbl_locations.selectRow(row)
+        item = self.tbl_locations.item(row, 0)
+        if item is not None:
+            self.tbl_locations.scrollToItem(item)
+
+    def on_edit_location(self, row: Optional[int] = None) -> None:
+        if not self._selected_ref:
+            return
+        _, check = self._selected_ref
+        if row is None:
+            row = self.tbl_locations.currentRow()
+        if row < 0 or row >= len(check.map_locations):
+            return
+
+        available_maps = self._available_location_maps()
+        if not available_maps:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Edit location",
+                "Assign ids to the maps in this pack before editing locations.",
+            )
+            return
+
+        location = check.map_locations[row]
+        dlg = EditLocationDialog(
+            self,
+            "Edit location",
+            available_maps=available_maps,
+            initial_map_id=location.map_id,
+            initial_x=location.x,
+            initial_y=location.y,
+            initial_size=location.size,
+        )
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        map_id, x, y, size = dlg.values()
+        if location.map_id == map_id and location.x == x and location.y == y and location.size == size:
+            return
+
+        location.map_id = map_id
+        location.x = x
+        location.y = y
+        location.size = size
+        self.model.changed.emit()
+        self._select_location_row(row)
 
     def on_add_location(self) -> None:
         if not self._selected_ref:
             return
+        available_maps = self._available_location_maps()
+        if not available_maps:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Add location",
+                "Assign ids to the maps in this pack before adding locations.",
+            )
+            return
         _, check = self._selected_ref
-        maps = [m.name for m in self.model.maps]
-        if not maps:
-            return
-        map_name, ok = QtWidgets.QInputDialog.getItem(self, "Add location", "Map:", maps, 0, False)
-        if not ok or not map_name:
-            return
-        check.map_locations.append(MapLocation(map=map_name, x=0, y=0, size=24))
-        self.model.changed.emit()
-        self.canvas.reload()
+        default_map_id = self._current_map_id()
+        if not default_map_id or default_map_id not in {map_def.id for map_def in available_maps}:
+            default_map_id = available_maps[0].id
 
-    def on_del_location(self) -> None:
+        dlg = EditLocationDialog(
+            self,
+            "Add location",
+            available_maps=available_maps,
+            initial_map_id=default_map_id,
+            initial_x=0,
+            initial_y=0,
+            initial_size=24,
+        )
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        map_id, x, y, size = dlg.values()
+        check.map_locations.append(MapLocation(map_id=map_id, x=x, y=y, size=size))
+        self.model.changed.emit()
+        new_row = len(check.map_locations) - 1
+        self._select_location_row(new_row)
+
+    def on_del_location(self, row: Optional[int] = None) -> None:
         if not self._selected_ref:
             return
-        _, check = self._selected_ref
-        row = self.tbl_locations.currentRow()
+        area, check = self._selected_ref
+        if row is None:
+            row = self.tbl_locations.currentRow()
         if row < 0 or row >= len(check.map_locations):
             return
         check.map_locations.pop(row)
+        first_location = check.map_locations[0] if check.map_locations else None
+        if first_location is not None:
+            map_def = self.model.find_map_by_id(first_location.map_id)
+            if map_def is not None:
+                self._set_current_map(map_def)
         self.model.changed.emit()
-        self.canvas.reload()
+        remaining = len(check.map_locations)
+        if remaining > 0:
+            self._select_location_row(0)
+        else:
+            self.canvas.set_selected_location(area, check, None)
 
     def _current_map_def(self) -> Optional[MapDef]:
         if not self._current_map:
@@ -1244,7 +1513,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _rescale_map_locations(
         self,
-        map_name: str,
+        map_id: str,
         old_size: Optional[Tuple[int, int]],
         new_size: Optional[Tuple[int, int]],
     ) -> None:
@@ -1261,16 +1530,31 @@ class MainWindow(QtWidgets.QMainWindow):
         scale_y = new_h / old_h
         for _, check in self.model.all_checks():
             for location in check.map_locations:
-                if location.map != map_name:
+                if location.map_id != map_id:
                     continue
                 location.x = int(round(location.x * scale_x))
                 location.y = int(round(location.y * scale_y))
 
-        map_def = self.model.find_map(map_name)
-        if map_def is not None:
-            for link in map_def.links:
-                link.x = int(round(link.x * scale_x))
-                link.y = int(round(link.y * scale_y))
+    def _rescale_map_links(
+        self,
+        map_def: MapDef,
+        old_size: Optional[Tuple[int, int]],
+        new_size: Optional[Tuple[int, int]],
+    ) -> None:
+        if not old_size or not new_size:
+            return
+        old_w, old_h = old_size
+        new_w, new_h = new_size
+        if old_w <= 0 or old_h <= 0 or new_w <= 0 or new_h <= 0:
+            return
+        if old_w == new_w and old_h == new_h:
+            return
+
+        scale_x = new_w / old_w
+        scale_y = new_h / old_h
+        for link in map_def.links:
+            link.x = int(round(link.x * scale_x))
+            link.y = int(round(link.y * scale_y))
 
     def _copy_image_into_pack(self, source_path: str) -> str:
         if not self.model.base_dir:
@@ -1306,24 +1590,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.model.base_dir:
             return
         existing_names = [m.name for m in self.model.maps]
+        existing_ids = [m.id for m in self.model.maps if m.id]
         dlg = AddEditMapDialog(
             parent=self,
             title="Add Map",
             existing_names=existing_names,
+            allowed_map_ids=self._allowed_map_ids,
+            existing_ids=existing_ids,
             initial_group="",
         )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
 
-        name, group, image_path = dlg.values()
+        map_id, name, group, image_path = dlg.values()
         try:
             rel_img = self._copy_image_into_pack(image_path)
-            self.model.maps.append(MapDef(name=name, img=rel_img, group=group, links=[], extra={}))
-            if not self.model.find_area(name):
-                self.model.areas.append(AreaDef(area=name, checks=[], extra={}))
-            self._current_map = name
+            map_def = MapDef(name=name, img=rel_img, group=group, id=map_id, links=[], extra={})
+            self.model.maps.append(map_def)
+            self._set_current_map(map_def)
             self.model.changed.emit()
-            self.show_status(f"Added map: {name}")
+            self.show_status(f"Added map: {self._map_label(map_def)}")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Add Map failed", str(exc))
 
@@ -1334,11 +1620,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         existing_names = [m.name for m in self.model.maps if m is not map_def]
+        existing_ids = [m.id for m in self.model.maps if m is not map_def and m.id]
+        old_editor_key = map_def.editor_key()
         dlg = AddEditMapDialog(
             parent=self,
             title="Edit Map",
             existing_names=existing_names,
+            allowed_map_ids=self._allowed_map_ids,
+            existing_ids=existing_ids,
             original_name=map_def.name,
+            original_id=map_def.id,
+            initial_id=map_def.id,
             initial_name=map_def.name,
             initial_group=map_def.group,
             initial_image=self._resolve_map_image_path(map_def),
@@ -1346,62 +1638,63 @@ class MainWindow(QtWidgets.QMainWindow):
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
 
-        new_name, new_group, image_path = dlg.values()
-        old_name = map_def.name
+        new_id, new_name, new_group, image_path = dlg.values()
+        old_id = map_def.id
         old_image_path = self._resolve_map_image_path(map_def)
         old_image_size = self._image_pixel_size(old_image_path)
         try:
             rel_img = self._copy_image_into_pack(image_path)
             new_image_path = str(self.model.base_dir / rel_img) if self.model.base_dir else image_path
             new_image_size = self._image_pixel_size(new_image_path)
+            self._rescale_map_locations(old_id, old_image_size, new_image_size)
+            self._rescale_map_links(map_def, old_image_size, new_image_size)
+
+            map_def.id = new_id
             map_def.name = new_name
             map_def.group = new_group
             map_def.img = rel_img
-            self._rescale_map_locations(old_name, old_image_size, new_image_size)
 
-            if old_name != new_name:
+            if old_id != new_id:
                 for _, check in self.model.all_checks():
                     for location in check.map_locations:
-                        if location.map == old_name:
-                            location.map = new_name
-
-                old_area = self.model.find_area(old_name)
-                new_area = self.model.find_area(new_name)
-                if old_area and new_area and old_area is not new_area:
-                    new_area.checks.extend(old_area.checks)
-                    self.model.areas.remove(old_area)
-                elif old_area:
-                    old_area.area = new_name
-                elif not new_area:
-                    self.model.areas.append(AreaDef(area=new_name, checks=[], extra={}))
+                        if location.map_id == old_id:
+                            location.map_id = new_id
 
                 for other_map in self.model.maps:
                     for link in other_map.links:
-                        if link.target_map == old_name:
-                            link.target_map = new_name
+                        if link.target_map_id == old_id:
+                            link.target_map_id = new_id
 
-                if self._current_map == old_name:
-                    self._current_map = new_name
+                if self._current_map == old_editor_key:
+                    self._set_current_map(map_def)
             self.model.changed.emit()
-            self.show_status(f"Edited map: {new_name}")
+            self.show_status(f"Edited map: {self._map_label(map_def)}")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Edit Map failed", str(exc))
 
-    def on_canvas_add_check_requested(self, map_name: str, x: int, y: int) -> None:
-        self._open_add_check_dialog(map_name, (x, y))
+    def on_canvas_add_check_requested(self, map_id: str, x: int, y: int) -> None:
+        self._open_add_check_dialog(map_id, (x, y))
 
     def _open_add_check_dialog(
         self,
-        map_name: Optional[str],
+        map_id: Optional[str],
         preset_xy: Optional[Tuple[int, int]],
     ) -> None:
-        if not map_name:
+        if not map_id:
             QtWidgets.QMessageBox.information(self, "Add Check", "Select a map first.")
+            return
+        map_def = self.model.find_map_by_id(map_id)
+        if map_def is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Add Check",
+                "The current map has no valid id. Set a map id before adding checks.",
+            )
             return
 
         dlg = AddCheckDialog(
             self,
-            map_name,
+            self._map_label(map_def),
             allowed_soh_ids=self._allowed_soh_ids,
             preset_xy=preset_xy,
         )
@@ -1409,11 +1702,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         check_name, check_hint, soh_id = dlg.values()
-        area_name = map_name
-        area = self.model.find_area(area_name)
-        if not area:
-            area = AreaDef(area=area_name, checks=[], extra={})
-            self.model.areas.append(area)
+        area = self._find_area_for_new_check(map_def)
 
         new_check = CheckDef(
             name=check_name,
@@ -1424,8 +1713,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         x = preset_xy[0] if preset_xy else 0
         y = preset_xy[1] if preset_xy else 0
-        new_check.map_locations.append(MapLocation(map=map_name, x=x, y=y, size=24))
-        self._current_map = map_name
+        new_check.map_locations.append(MapLocation(map_id=map_def.id, x=x, y=y, size=24))
+        self._set_current_map(map_def)
         area.checks.append(new_check)
         self.model.changed.emit()
         self.select_check(area, new_check, ensure_visible=True)
@@ -1448,6 +1737,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             area.checks.remove(check)
+            self._prune_empty_areas()
             self._selected_ref = None
             self.model.changed.emit()
             self.show_status("Deleted check")

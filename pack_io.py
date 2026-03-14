@@ -69,17 +69,22 @@ def load_pack_from_zip(model: PackModel, zip_path: Path) -> None:
 
     maps_raw = safe_load_json(root / "maps.json")
     model.maps = []
+    missing_map_ids: List[str] = []
     for item in maps_raw:
         extra = {
             k: v
             for k, v in item.items()
-            if k not in {"name", "img", "group", "links"} | BANNED_MAP_FIELDS
+            if k not in {"name", "img", "group", "id", "links"} | BANNED_MAP_FIELDS
         }
+        map_id = str(item.get("id", "")).strip()
+        if not map_id:
+            missing_map_ids.append(str(item.get("name", "(unnamed map)")))
         model.maps.append(
             MapDef(
                 name=str(item.get("name", "")),
                 img=str(item.get("img", "")),
                 group=str(item.get("group", "")),
+                id=map_id,
                 links=[MapLink.from_dict(link) for link in item.get("links", [])],
                 extra=extra,
             )
@@ -111,6 +116,17 @@ def load_pack_from_zip(model: PackModel, zip_path: Path) -> None:
                 )
             model.areas.append(AreaDef(area=area_name, checks=checks, extra=area_extra))
 
+    if missing_map_ids:
+        preview = ", ".join(missing_map_ids[:6])
+        if len(missing_map_ids) > 6:
+            preview += ", ..."
+        model.load_warnings.append(
+            "This pack is outdated and may not work correctly. "
+            "One or more maps are missing ids, and this editor no longer converts map names to ids. "
+            "Update to a more recent resource pack before making changes unless you know exactly what you are doing.\n\n"
+            f"Maps missing ids: {preview}"
+        )
+
     model.changed.emit()
 
 
@@ -140,6 +156,7 @@ def export_pack_to_zip(model: PackModel, out_zip: Path, preserve_unknown: bool) 
             "name": m.name,
             "img": m.img,
             "group": m.group,
+            "id": m.id,
             "links": [link.to_dict(preserve_unknown) for link in m.links],
         }
         if preserve_unknown:
@@ -150,8 +167,9 @@ def export_pack_to_zip(model: PackModel, out_zip: Path, preserve_unknown: bool) 
     safe_write_json(root / "maps.json", maps_out)
 
     for area in model.areas:
-        area_out: Dict[str, Any] = {"area": area.area}
+        area_out: Dict[str, Any] = {}
         if preserve_unknown:
+            area_out["area"] = area.area
             area_out.update(area.extra)
 
         checks_out: List[Dict[str, Any]] = []
